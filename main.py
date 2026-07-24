@@ -8,7 +8,7 @@ from streamlit_calendar import calendar
 
 st.set_page_config(page_title="근태 및 시간외근무 관리 시스템", page_icon="🏢", layout="wide")
 
-# 근로자 정보
+# 근로자 기본 정보
 WORKERS = [
     {"name": "박은경", "hire_date": date(2016, 3, 1), "color": "#3182CE"},
     {"name": "채미혜", "hire_date": date(2018, 3, 1), "color": "#38A169"},
@@ -88,7 +88,7 @@ def calculate_net_minutes(start_str, end_str):
             return 0
         total_mins = int((e_dt - s_dt).total_seconds() // 60)
         
-        # 점심시간(12:00~13:00) 포함 시 자동 제외
+        # 휴게시간 (12:00~13:00) 자동 차감
         lunch_start = datetime.strptime("12:00", "%H:%M")
         lunch_end = datetime.strptime("13:00", "%H:%M")
         if s_dt <= lunch_start and e_dt >= lunch_end:
@@ -134,7 +134,40 @@ def get_current_period(hire_d, ref_date=None):
     return start_date, end_date
 
 # ---------------------------------------------------------
-# UI 화면 구성
+# 사이드바: 근로자별 수당 단가 설정
+# ---------------------------------------------------------
+st.sidebar.title("⚙️ 근로자별 수당 단가 설정")
+
+wage_rates = {}
+
+with st.sidebar.expander("🔻 근로자별 통상/시간외 단가 입력", expanded=True):
+    for w in WORKERS:
+        name = w["name"]
+        st.markdown(f"**[{name}]**")
+        col_ot, col_ord = st.columns(2)
+        
+        with col_ot:
+            ot_rate = st.number_input(
+                f"{name} 시간외단가", 
+                value=20000, 
+                step=1000, 
+                key=f"ot_rate_{name}"
+            )
+        with col_ord:
+            ord_rate = st.number_input(
+                f"{name} 통상단가", 
+                value=15000, 
+                step=1000, 
+                key=f"ord_rate_{name}"
+            )
+            
+        wage_rates[name] = {
+            "ot_rate": ot_rate,
+            "ord_rate": ord_rate
+        }
+
+# ---------------------------------------------------------
+# 메인 UI
 # ---------------------------------------------------------
 st.title("🏢 근태 및 시간외근무 종합 대시보드")
 
@@ -144,7 +177,6 @@ if st.button("🔄 전체 데이터 새로고침"):
 
 st.markdown("---")
 
-# 1. 원본 데이터 로드
 ot_df = load_sheet_raw_data("시간외근무")
 
 summary_list = []
@@ -152,14 +184,15 @@ calendar_events = []
 categories = ["연차", "대체휴무", "병가", "공가"]
 
 for w in WORKERS:
-    # 2. 휴가 데이터 (개인별)
-    df = load_sheet_raw_data(w["name"])
+    name = w["name"]
+    df = load_sheet_raw_data(name)
     p_start, p_end = get_current_period(w["hire_date"])
     p_start_dt = pd.to_datetime(p_start)
     p_end_dt = pd.to_datetime(p_end)
     
     cat_mins = {cat: 0 for cat in categories}
     
+    # 개인 휴가 집계
     if not df.empty and "날짜" in df.columns:
         clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.replace("/", "-").str.strip()
         df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce')
@@ -181,47 +214,57 @@ for w in WORKERS:
             
             if ":" in s_time and ":" in e_time:
                 calendar_events.append({
-                    "title": f"[{w['name']}] {cat} ({s_time}~{e_time})",
+                    "title": f"[{name}] {cat} ({s_time}~{e_time})",
                     "start": f"{d_str}T{s_time:0>5}:00",
                     "end": f"{d_str}T{e_time:0>5}:00",
                     "color": w["color"],
                     "textColor": "#FFFFFF"
                 })
 
-    # 3. 시간외근무 데이터 (시작시간~종료시간 기반 자동 계산)
+    # 시간외근무 데이터 (단가 반영 연산)
     total_ot_pay_mins = 0
     total_ordinary_mins = 0
     total_ot_allowance = 0
 
+    rates = wage_rates.get(name, {"ot_rate": 20000, "ord_rate": 15000})
+
     if not ot_df.empty and "이름" in ot_df.columns:
-        # 날짜 정제 및 개인 입사주기(산정주기) 범위 필터링
         clean_ot_dates = ot_df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.replace("/", "-").str.strip()
         ot_df['date_dt'] = pd.to_datetime(clean_ot_dates, errors='coerce')
         
         ot_worker_df = ot_df[
-            (ot_df["이름"].astype(str).str.strip() == w["name"]) &
+            (ot_df["이름"].astype(str).str.strip() == name) &
             (ot_df["date_dt"] >= p_start_dt) &
             (ot_df["date_dt"] <= p_end_dt)
         ]
         
         for _, row in ot_worker_df.iterrows():
-            # 1) 열에 직접 숫자가 적혀있으면 사용
             ot_pay_val = parse_time_to_minutes(row.get("시간외수당적용시간", 0))
             ord_val = parse_time_to_minutes(row.get("통상임금적용시간", 0))
             allowance_val = parse_currency(row.get("지급수당", 0))
             
-            # 2) 만약 열이 빈칸이면 '시작시간'과 '종료시간' 차이로 자동 계산
-            if ot_pay_val == 0 and ord_val == 0:
-                calc_mins = calculate_net_minutes(row.get("시작시간", ""), row.get("종료시간", ""))
-                total_ot_pay_mins += calc_mins
-            else:
+            net_m = calculate_net_minutes(row.get("시작시간", ""), row.get("종료시간", ""))
+            
+            # 시간외수당 적용시간
+            if ot_pay_val > 0:
                 total_ot_pay_mins += ot_pay_val
-                total_ordinary_mins += ord_val
+            else:
+                total_ot_pay_mins += net_m
                 
-            total_ot_allowance += allowance_val
+            # 통상임금 적용시간 (기본 1.5배)
+            if ord_val > 0:
+                total_ordinary_mins += ord_val
+            else:
+                total_ordinary_mins += int(net_m * 1.5)
+                
+            # 지급수당 (시트 입력값 없으면 단가 × 시간 계산)
+            if allowance_val > 0:
+                total_ot_allowance += allowance_val
+            else:
+                total_ot_allowance += int((net_m / 60.0) * rates["ot_rate"])
 
     summary_list.append({
-        "근로자명": w["name"],
+        "근로자명": name,
         "입사일": w["hire_date"].strftime("%Y-%m-%d"),
         "현재 산정주기": f"{p_start.strftime('%Y-%m-%d')} ~ {p_end.strftime('%Y-%m-%d')}",
         "연차 시간": minutes_to_hhmm(cat_mins["연차"]),
@@ -233,7 +276,7 @@ for w in WORKERS:
         "시간외 총 지급수당": f"{total_ot_allowance:,}원"
     })
 
-# 4. 달력 이벤트 등록 (시간외근무)
+# 달력 이벤트 추가 (시간외근무)
 if not ot_df.empty and "날짜" in ot_df.columns:
     for _, row in ot_df.iterrows():
         if pd.isna(row.get('date_dt')):
