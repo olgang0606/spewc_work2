@@ -1,10 +1,14 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+import time
 
-st.set_page_config(page_title="채미혜 근무 관리", layout="wide")
+st.set_page_config(page_title="근무 관리", layout="wide")
 
+# ---------------------------------------------------------
+# 
+# ---------------------------------------------------------
 WORKER_NAME = "채미혜"
 HIRE_DATE = date(2018, 3, 1)
 
@@ -12,27 +16,30 @@ HIRE_DATE = date(2018, 3, 1)
 # 시간 및 연차 계산 함수
 # ---------------------------------------------------------
 def calculate_net_minutes(start_str, end_str):
-    fmt = "%H:%M"
-    t_start = datetime.strptime(start_str, fmt)
-    t_end = datetime.strptime(end_str, fmt)
-    
-    if t_end <= t_start:
-        return 0
-    
-    total_mins = int((t_end - t_start).total_seconds() // 60)
-    
-    # 12:00~13:00 점심시간 차감
-    lunch_start = datetime.strptime("12:00", fmt)
-    lunch_end = datetime.strptime("13:00", fmt)
-    
-    overlap_start = max(t_start, lunch_start)
-    overlap_end = min(t_end, lunch_end)
-    
-    if overlap_start < overlap_end:
-        overlap_mins = int((overlap_end - overlap_start).total_seconds() // 60)
-        total_mins -= overlap_mins
+    try:
+        fmt = "%H:%M"
+        t_start = datetime.strptime(start_str, fmt)
+        t_end = datetime.strptime(end_str, fmt)
         
-    return max(0, total_mins)
+        if t_end <= t_start:
+            return 0
+        
+        total_mins = int((t_end - t_start).total_seconds() // 60)
+        
+        # 12:00~13:00 점심시간 차감
+        lunch_start = datetime.strptime("12:00", fmt)
+        lunch_end = datetime.strptime("13:00", fmt)
+        
+        overlap_start = max(t_start, lunch_start)
+        overlap_end = min(t_end, lunch_end)
+        
+        if overlap_start < overlap_end:
+            overlap_mins = int((overlap_end - overlap_start).total_seconds() // 60)
+            total_mins -= overlap_mins
+            
+        return max(0, total_mins)
+    except:
+        return 0
 
 def minutes_to_hhmm(mins):
     h = mins // 60
@@ -66,8 +73,9 @@ def get_annual_leave_hours(hire_d, target_d=None):
         return min(15 + add_days, 25) * 8
 
 # ---------------------------------------------------------
-# 구글 시트 연동 함수
+# 구글 시트 연동 함수 (캐시 타임아웃 2초 설정)
 # ---------------------------------------------------------
+@st.cache_data(ttl=2)
 def load_data():
     try:
         sheet_url = st.secrets["SHEET_URL"]
@@ -120,7 +128,7 @@ for i, cat in enumerate(categories):
 
 st.markdown("---")
 
-# 입력 폼
+# 입력 폼 (시간 단위 step=1800 적용 -> 30분 단위)
 st.subheader("📝 근무 / 휴가 신청 작성")
 with st.form("entry_form"):
     c1, c2, c3 = st.columns(3)
@@ -128,8 +136,8 @@ with st.form("entry_form"):
         req_date = st.date_input("날짜", date.today())
         category = st.selectbox("구분", categories)
     with c2:
-        start_t = st.time_input("시작시간", datetime.strptime("09:00", "%H:%M").time())
-        end_t = st.time_input("종료시간", datetime.strptime("18:00", "%H:%M").time())
+        start_t = st.time_input("시작시간", datetime.strptime("09:00", "%H:%M").time(), step=1800)
+        end_t = st.time_input("종료시간", datetime.strptime("18:00", "%H:%M").time(), step=1800)
     with c3:
         destination = st.text_input("목적지")
         reason = st.text_input("사유")
@@ -155,11 +163,15 @@ if submit:
             "목적지": destination,
             "사유": reason
         }
-        if save_to_sheet(payload):
-            st.success("성공적으로 저장되었습니다!")
-            st.rerun()
-        else:
-            st.error("저장에 실패했습니다.")
+        
+        with st.spinner("구글 시트에 기록 중입니다..."):
+            if save_to_sheet(payload):
+                st.cache_data.clear()  # 캐시 강제 비우기
+                time.sleep(1)          # 구글 시트 반영 대기
+                st.success(f"성공적으로 저장되었습니다! (인정 시간: {total_hhmm})")
+                st.rerun()
+            else:
+                st.error("저장에 실패했습니다. SHEET_URL을 확인하세요.")
 
 st.markdown("---")
 
