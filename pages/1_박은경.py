@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 from datetime import datetime, date
 import time
+import re
 
 st.set_page_config(page_title="박은경 근무 관리", layout="wide")
 
@@ -16,6 +17,18 @@ HIRE_DATE = date(2016, 3, 1)
 # ---------------------------------------------------------
 # 시간 및 연차 계산 함수
 # ---------------------------------------------------------
+def clean_time_str(val):
+    """ISO 날짜 형식이나 따옴표가 섞여 들어왔을 때 HH:MM 추출"""
+    if pd.isna(val) or not val:
+        return ""
+    val_str = str(val).strip().lstrip("'")
+    
+    # HH:MM 예외 처리 (ISO 포맷 정규식 추출)
+    match = re.search(r'(\d{2}:\d{2})', val_str)
+    if match:
+        return match.group(1)
+    return val_str
+
 def calculate_net_minutes(start_str, end_str):
     try:
         fmt = "%H:%M"
@@ -49,9 +62,10 @@ def minutes_to_hhmm(mins):
 
 def hhmm_to_minutes(s):
     try:
-        if pd.isna(s) or not s:
+        clean_s = clean_time_str(s)
+        if not clean_s:
             return 0
-        parts = str(s).strip().split(":")
+        parts = clean_s.split(":")
         return int(parts[0]) * 60 + int(parts[1])
     except:
         return 0
@@ -76,7 +90,7 @@ def get_annual_leave_hours(hire_d, target_d=None):
         return min(15 + add_days, 25) * 8
 
 # ---------------------------------------------------------
-# 구글 시트 연동 함수 (개별 시트 탭 읽기/쓰기)
+# 구글 시트 연동 함수
 # ---------------------------------------------------------
 @st.cache_data(ttl=1)
 def load_data(sheet_name):
@@ -86,7 +100,15 @@ def load_data(sheet_name):
         data = res.json()
         if not data or len(data) < 2:
             return pd.DataFrame(columns=["근로자명", "날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"])
-        return pd.DataFrame(data[1:], columns=data[0])
+        
+        df_res = pd.DataFrame(data[1:], columns=data[0])
+        
+        # 시간 관련 컬럼 정제 처리
+        for col in ["시작시간", "종료시간", "총시간"]:
+            if col in df_res.columns:
+                df_res[col] = df_res[col].apply(clean_time_str)
+                
+        return df_res
     except:
         return pd.DataFrame(columns=["근로자명", "날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"])
 
@@ -126,7 +148,7 @@ for i, cat in enumerate(categories):
 
 st.markdown("---")
 
-# 입력 폼 (30분 단위 선택)
+# 입력 폼 (30분 단위)
 st.subheader("📝 근무 / 휴가 신청 작성")
 with st.form("entry_form"):
     c1, c2, c3 = st.columns(3)
@@ -165,7 +187,7 @@ if submit:
         
         with st.spinner("구글 시트에 기록 중입니다..."):
             if save_to_sheet(payload):
-                st.cache_data.clear()  # 캐시 삭제로 즉시 새로고침 반영
+                st.cache_data.clear()
                 time.sleep(1)
                 st.success(f"성공적으로 저장되었습니다! (인정 시간: {total_hhmm})")
                 st.rerun()
