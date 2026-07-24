@@ -6,11 +6,11 @@ import time
 import re
 
 # =========================================================
-# 
+# 👤 근로자 및 입사일 설정 (파일별 수정)
 # =========================================================
-WORKER_NAME = "박은경"
+WORKER_NAME = "박은경"  # 근로자 이름 ("채미혜", "박인미", "조윤희", "성지영")
 SHEET_NAME = WORKER_NAME
-HIRE_DATE = date(2016, 3, 1)
+HIRE_DATE = date(2016, 3, 1)  # 입사일 (YYYY, MM, DD)
 
 st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", page_icon="👤", layout="wide")
 
@@ -21,10 +21,9 @@ def get_current_period(hire_d, ref_date=None):
     if ref_date is None:
         ref_date = date.today()
     
-    # 올해 입사일 계산
     try:
         this_year_hire = date(ref_date.year, hire_d.month, hire_d.day)
-    except ValueError: # 윤년 2/29 예외 처리
+    except ValueError: # 윤년 예외 처리
         this_year_hire = date(ref_date.year, hire_d.month, 28)
         
     if ref_date >= this_year_hire:
@@ -69,7 +68,7 @@ def minutes_to_hhmm(mins):
     mins = max(0, int(mins))
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
-# 12:00~13:00 점심시간 제외 실근무/휴가 시간 계산
+# 12:00~13:00 점심시간 차감 로직
 def calculate_net_minutes(start_str, end_str):
     try:
         fmt = "%H:%M"
@@ -81,7 +80,6 @@ def calculate_net_minutes(start_str, end_str):
         
         total_mins = int((t_end - t_start).total_seconds() // 60)
         
-        # 12:00~13:00 점심시간 구간 포함 시 자동 차감
         lunch_start = datetime.strptime("12:00", fmt)
         lunch_end = datetime.strptime("13:00", fmt)
         
@@ -97,7 +95,7 @@ def calculate_net_minutes(start_str, end_str):
         return 0
 
 # ---------------------------------------------------------
-# 구글 시트 데이터 로드 및 저장
+# 구글 시트 연동 함수
 # ---------------------------------------------------------
 @st.cache_data(ttl=1)
 def load_data(sheet_name):
@@ -137,7 +135,6 @@ def save_to_sheet(payload):
 # ---------------------------------------------------------
 st.title(f"👤 {WORKER_NAME} 근태 관리")
 
-# 입사일 및 현재 1년 산정 주기 안내
 period_start, period_end = get_current_period(HIRE_DATE)
 st.caption(f"📅 **입사일:** {HIRE_DATE.strftime('%Y-%m-%d')} | **현재 산정 주기 (1년):** {period_start.strftime('%Y-%m-%d')} ~ {period_end.strftime('%Y-%m-%d')}")
 st.markdown("---")
@@ -145,11 +142,10 @@ st.markdown("---")
 df = load_data(SHEET_NAME)
 categories = ["연차", "대체휴무", "병가", "공가"]
 
-# 1. 상단 근무 유형별 누적 사용시간 지표 (현재 산정 주기 1년 기준 필터링)
+# 1. 상단 누적 요약 지표
 cols = st.columns(4)
 
 if not df.empty and "날짜" in df.columns:
-    # 날짜 데이터 변환 및 현 주기에 맞는 데이터만 필터링
     df['date_dt'] = pd.to_datetime(df['날짜'], errors='coerce').dt.date
     period_df = df[(df['date_dt'] >= period_start) & (df['date_dt'] <= period_end)]
 else:
@@ -158,30 +154,38 @@ else:
 for i, cat in enumerate(categories):
     t_mins = 0
     if not period_df.empty and "구분" in period_df.columns and "총시간" in period_df.columns:
-        cat_df = period_df[period_df["구분"].str.strip() == cat]
+        # 공백 제거 후 정확한 조건 비교
+        cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
         for val in cat_df["총시간"]:
             t_mins += hhmm_to_minutes(val)
             
-    cols[i].metric(f"총 {cat} 시간 (당해연도)", minutes_to_hhmm(t_mins))
+    cols[i].metric(f"총 {cat} 시간", minutes_to_hhmm(t_mins))
 
 st.markdown("---")
 
-# 2. 근무 / 휴가 신청 폼
+# 2. 근무 / 휴가 신청 작성 폼 (입력 필드 정돈)
 st.subheader("📝 근무 / 휴가 신청 작성")
+
 with st.form("entry_form"):
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    row1_1, row1_2, row1_3 = st.columns(3)
+    with row1_1:
         req_date = st.date_input("날짜", date.today())
-        category = st.selectbox("구분", categories)
-    with c2:
+    with row1_2:
         start_t = st.time_input("시작시간", datetime.strptime("09:00", "%H:%M").time(), step=1800)
+    with row1_3:
         end_t = st.time_input("종료시간", datetime.strptime("18:00", "%H:%M").time(), step=1800)
-    with c3:
+
+    row2_1, row2_2, row2_3 = st.columns(3)
+    with row2_1:
+        category = st.selectbox("구분", categories)
+    with row2_2:
         destination = st.text_input("목적지")
+    with row2_3:
         reason = st.text_input("사유")
-        
+
     submit = st.form_submit_button("시트에 저장하기")
 
+# 저장 처리
 if submit:
     s_str = start_t.strftime("%H:%M")
     e_str = end_t.strftime("%H:%M")
@@ -191,6 +195,8 @@ if submit:
         st.error("종료시간은 시작시간보다 나중이어야 하며, 점심시간(12:00~13:00) 외 실근무 시간이 포함되어야 합니다.")
     else:
         total_hhmm = minutes_to_hhmm(net_mins)
+        
+        # 구글 시트 저장 데이터 패킷 (파라미터 명칭 명확화)
         payload = {
             "sheetName": SHEET_NAME,
             "날짜": req_date.strftime("%Y-%m-%d"),
