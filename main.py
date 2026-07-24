@@ -182,11 +182,11 @@ st.subheader("📅 월간 근태 일정표")
 # 범례 (Legend) 표기
 st.markdown("""
 <div style="display: flex; gap: 15px; margin-bottom: 15px; font-weight: bold;">
-    <span style="color: #3182CE;">■ 박은경 (파랑)</span>
-    <span style="color: #38A169;">■ 채미혜 (초록)</span>
-    <span style="color: #00B5D8;">■ 박인미 (하늘)</span>
-    <span style="color: #DD6B20;">■ 조윤희 (주황)</span>
-    <span style="color: #805AD5;">■ 성지영 (보라)</span>
+    <span style="color: #3182CE;">■ 박은경</span>
+    <span style="color: #38A169;">■ 채미혜</span>
+    <span style="color: #00B5D8;">■ 박인미</span>
+    <span style="color: #DD6B20;">■ 조윤희</span>
+    <span style="color: #805AD5;">■ 성지영</span>
 </div>
 """, unsafe_allow_html=True)
 
