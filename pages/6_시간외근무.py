@@ -5,55 +5,6 @@ from google.oauth2.service_account import Credentials
 from datetime import date, datetime
 import re
 
-def is_korean_holiday(target_date):
-    if isinstance(target_date, datetime):
-        target_date = target_date.date()
-    m, d = target_date.month, target_date.day
-    fixed_holidays = [(1, 1), (3, 1), (5, 5), (6, 6), (8, 15), (10, 3), (10, 9), (12, 25)]
-    if (m, d) in fixed_holidays:
-        return True
-    variable_holidays = {
-        2024: [(2, 9), (2, 10), (2, 12), (4, 10), (5, 15), (9, 16), (9, 17), (9, 18)],
-        2025: [(1, 28), (1, 29), (1, 30), (3, 3), (5, 5), (5, 6), (10, 5), (10, 6), (10, 7), (10, 8)],
-        2026: [(2, 16), (2, 17), (2, 18), (3, 2), (5, 24), (5, 25), (9, 24), (9, 25), (9, 26), (10, 5)]
-    }
-    return (m, d) in variable_holidays.get(target_date.year, [])
-
-def calculate_overtime_minutes(work_date, start_str, end_str):
-    s_hhmm = extract_time_str(start_str)
-    e_hhmm = extract_time_str(end_str)
-    if not s_hhmm or not e_hhmm or not work_date:
-        return 0
-
-    try:
-        s_dt = datetime.strptime(f"{work_date} {s_hhmm}", "%Y-%m-%d %H:%M")
-        e_dt = datetime.strptime(f"{work_date} {e_hhmm}", "%Y-%m-%d %H:%M")
-        if e_dt <= s_dt:
-            return 0
-
-        # 주말 및 공휴일 여부 체크
-        is_weekend_or_holiday = (work_date.weekday() >= 5) or is_korean_holiday(work_date)
-
-        if is_weekend_or_holiday:
-            valid_mins = int((e_dt - s_dt).total_seconds() // 60)
-            return min(valid_mins, 480) # 최대 8시간
-        else:
-            work_start = datetime.strptime(f"{work_date} 09:00", "%Y-%m-%d %H:%M")
-            work_end = datetime.strptime(f"{work_date} 18:00", "%Y-%m-%d %H:%M")
-
-            overlap_start = max(s_dt, work_start)
-            overlap_end = min(e_dt, work_end)
-            
-            overlap_mins = 0
-            if overlap_start < overlap_end:
-                overlap_mins = int((overlap_end - overlap_start).total_seconds() // 60)
-
-            total_mins = int((e_dt - s_dt).total_seconds() // 60)
-            net_overtime = total_mins - overlap_mins
-            return min(max(0, net_overtime), 240) # 최대 4시간
-    except Exception:
-        return 0
-
 st.set_page_config(page_title="시간외근무 신청 및 현황", page_icon="⏰", layout="wide")
 
 WORKERS = [
@@ -65,8 +16,39 @@ WORKERS = [
 ]
 
 WORKER_WAGE_MAP = {w["name"]: w["wage"] for w in WORKERS}
-kr_holidays = holidays.KR()
 
+# ---------------------------------------------------------
+# 한국 주요 법정/대체 공휴일 판별 함수 (패키지 미사용)
+# ---------------------------------------------------------
+def is_korean_holiday(target_date):
+    if isinstance(target_date, datetime):
+        target_date = target_date.date()
+        
+    m, d = target_date.month, target_date.day
+    
+    fixed_holidays = [
+        (1, 1),   # 신정
+        (3, 1),   # 삼일절
+        (5, 5),   # 어린이날
+        (6, 6),   # 현충일
+        (8, 15),  # 광복절
+        (10, 3),  # 개천절
+        (10, 9),  # 한글날
+        (12, 25)  # 성탄절
+    ]
+    if (m, d) in fixed_holidays:
+        return True
+        
+    variable_holidays = {
+        2024: [(2, 9), (2, 10), (2, 12), (4, 10), (5, 15), (9, 16), (9, 17), (9, 18)],
+        2025: [(1, 28), (1, 29), (1, 30), (3, 3), (5, 5), (5, 6), (10, 5), (10, 6), (10, 7), (10, 8)],
+        2026: [(2, 16), (2, 17), (2, 18), (3, 2), (5, 24), (5, 25), (9, 24), (9, 25), (9, 26), (10, 5)]
+    }
+    return (m, d) in variable_holidays.get(target_date.year, [])
+
+# ---------------------------------------------------------
+# Google Sheets API 연동
+# ---------------------------------------------------------
 @st.cache_resource
 def get_gspread_client():
     scopes = [
@@ -96,7 +78,8 @@ def calculate_overtime_minutes(work_date, start_str, end_str):
         if e_dt <= s_dt:
             return 0
 
-        is_weekend_or_holiday = (work_date.weekday() >= 5) or (work_date in kr_holidays)
+        # 주말/공휴일 체크 (자체 함수 사용)
+        is_weekend_or_holiday = (work_date.weekday() >= 5) or is_korean_holiday(work_date)
 
         if is_weekend_or_holiday:
             valid_mins = int((e_dt - s_dt).total_seconds() // 60)
@@ -158,9 +141,9 @@ with st.form("overtime_form", clear_on_submit=True):
         req_date = st.date_input("근무 날짜", date.today())
     with col3:
         time_options = [f"{h:02d}:{m:02d}" for h in range(0, 24) for m in (0, 30)]
-        start_time = st.selectbox("시작시간", time_options, index=36) # 18:00 기본값
+        start_time = st.selectbox("시작시간", time_options, index=36) # 18:00
     with col4:
-        end_time = st.selectbox("종료시간", time_options, index=42) # 21:00 기본값
+        end_time = st.selectbox("종료시간", time_options, index=42) # 21:00
 
     col5, col6 = st.columns([6, 4])
     with col5:
@@ -173,20 +156,17 @@ with st.form("overtime_form", clear_on_submit=True):
 
     if submitted:
         if worksheet is None:
-            st.error("구글 시트 '시간외근무' 탭 연결 실패! 구글 시트에 '시간외근무' 탭이 있는지 확인해 주세요.")
+            st.error("구글 시트 '시간외근무' 탭 연결 실패! 구글 시트에 '시간외근무' 탭이 생성되어 있는지 확인해 주세요.")
         else:
-            # 1. 근무시간 계산 (규정 제한 적용)
             valid_work_mins = calculate_overtime_minutes(req_date, start_time, end_time)
             work_time_str = minutes_to_hhmm(valid_work_mins)
 
-            # 2. 대체휴무 분(Minutes) 차감
             off_h, off_m = map(int, off_time_str.split(":"))
             off_mins = off_h * 60 + off_m
             
             pay_mins = max(0, valid_work_mins - off_mins)
             pay_time_str = minutes_to_hhmm(pay_mins)
 
-            # 3. 수당 산출
             hourly_wage = WORKER_WAGE_MAP.get(worker_name, 0)
             calculated_pay = int((pay_mins / 60) * hourly_wage)
             pay_str = f"{calculated_pay:,}원"
@@ -213,9 +193,6 @@ with st.form("overtime_form", clear_on_submit=True):
 
 st.markdown("---")
 
-# ---------------------------------------------------------
-# 전체 시간외근무 목록
-# ---------------------------------------------------------
 st.subheader("📋 전체 시간외근무 기록 목록")
 
 if not df.empty:
