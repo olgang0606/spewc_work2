@@ -8,7 +8,7 @@ from streamlit_calendar import calendar
 
 st.set_page_config(page_title="근태 및 시간외근무 관리 시스템", page_icon="🏢", layout="wide")
 
-# 근로자 정보 (추후 단가 전달 시 아래 맵에 금액을 채워넣을 수 있습니다)
+# 근로자 정보
 WORKERS = [
     {"name": "박은경", "hire_date": date(2016, 3, 1), "color": "#3182CE"},
     {"name": "채미혜", "hire_date": date(2018, 3, 1), "color": "#38A169"},
@@ -17,27 +17,7 @@ WORKERS = [
     {"name": "성지영", "hire_date": date(2026, 7, 1), "color": "#805AD5"},
 ]
 
-# 단가 매핑 (추후 알려주시는 금액으로 업데이트 가능)
-OVERTIME_WAGE_MAP = {w["name"]: 0 for w in WORKERS}
-ORDINARY_WAGE_MAP = {w["name"]: 0 for w in WORKERS}
 WORKER_COLOR_MAP = {w["name"]: w["color"] for w in WORKERS}
-
-# ---------------------------------------------------------
-# 한국 주요 법정/대체 공휴일 판별 함수
-# ---------------------------------------------------------
-def is_korean_holiday(target_date):
-    if isinstance(target_date, datetime):
-        target_date = target_date.date()
-    m, d = target_date.month, target_date.day
-    fixed_holidays = [(1, 1), (3, 1), (5, 5), (6, 6), (8, 15), (10, 3), (10, 9), (12, 25)]
-    if (m, d) in fixed_holidays:
-        return True
-    variable_holidays = {
-        2024: [(2, 9), (2, 10), (2, 12), (4, 10), (5, 15), (9, 16), (9, 17), (9, 18)],
-        2025: [(1, 28), (1, 29), (1, 30), (3, 3), (5, 5), (5, 6), (10, 5), (10, 6), (10, 7), (10, 8)],
-        2026: [(2, 16), (2, 17), (2, 18), (3, 2), (5, 24), (5, 25), (9, 24), (9, 25), (9, 26), (10, 5)]
-    }
-    return (m, d) in variable_holidays.get(target_date.year, [])
 
 # ---------------------------------------------------------
 # Google Sheets API 연동
@@ -55,29 +35,48 @@ def get_gspread_client():
     return gspread.authorize(credentials)
 
 @st.cache_data(ttl=3)
-def load_sheet_data(sheet_name, target_cols):
+def load_sheet_raw_data(sheet_name):
+    """구글 시트의 원본 데이터를 안전하게 가공 없이 읽어옴"""
     try:
         gc = get_gspread_client()
         sh = gc.open_by_url(st.secrets["SPREADSHEET_URL"])
         worksheet = sh.worksheet(sheet_name)
         records = worksheet.get_all_records()
         if not records:
-            return pd.DataFrame(columns=target_cols)
-        df = pd.DataFrame(records)
-        for col in target_cols:
-            if col not in df.columns:
-                df[col] = ""
-        return df[target_cols]
+            return pd.DataFrame()
+        return pd.DataFrame(records)
     except Exception:
-        return pd.DataFrame(columns=target_cols)
+        return pd.DataFrame()
 
 # ---------------------------------------------------------
-# 시간 계산 및 유틸리티 함수
+# 시간 및 유틸리티 안전 변환 함수
 # ---------------------------------------------------------
 def extract_time_str(val):
+    if pd.isna(val) or val is None:
+        return ""
     s = str(val).strip().replace("'", "").replace('"', '')
     match = re.search(r'(\d{1,2}:\d{2})', s)
     return match.group(1) if match else ""
+
+def hhmm_to_minutes(val):
+    """'HH:MM' 포맷이나 일반 숫자를 모두 안전하게 분(Minutes)으로 변환"""
+    if pd.isna(val) or val is None:
+        return 0
+    s = str(val).strip().replace("'", "").replace('"', '')
+    
+    # "HH:MM" 형태
+    if ":" in s:
+        try:
+            parts = s.split(":")
+            return int(parts[0]) * 60 + int(parts[1])
+        except Exception:
+            return 0
+    # 숫자로만 이루어진 경우 (예: 2.5시간 -> 150분)
+    try:
+        val_float = float(s)
+        return int(val_float * 60)
+    except Exception:
+        return 0
 
 def calculate_net_minutes(start_str, end_str):
     s_hhmm = extract_time_str(start_str)
@@ -90,6 +89,8 @@ def calculate_net_minutes(start_str, end_str):
         if e_dt <= s_dt:
             return 0
         total_mins = int((e_dt - s_dt).total_seconds() // 60)
+        
+        # 점심시간 차감 (12:00 ~ 13:00)
         lunch_start = datetime.strptime("12:00", "%H:%M")
         lunch_end = datetime.strptime("13:00", "%H:%M")
         if s_dt <= lunch_start and e_dt >= lunch_end:
@@ -102,19 +103,19 @@ def minutes_to_hhmm(mins):
     mins = max(0, int(mins))
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
-def hhmm_to_minutes(hhmm_str):
-    s = extract_time_str(hhmm_str)
-    if not s:
-        return 0
-    try:
-        h, m = map(int, s.split(":"))
-        return h * 60 + m
-    except Exception:
-        return 0
-
 def truncate_minutes_monthly(mins):
     """월 단위 합산 후 1시간 미만(분 단위) 버림"""
     return (mins // 60) * 60
+
+def parse_currency(val):
+    """'120,000원' 형태의 문자열을 정수로 안전 변환"""
+    if pd.isna(val) or val is None:
+        return 0
+    s = str(val).replace(",", "").replace("원", "").strip()
+    try:
+        return int(float(s))
+    except Exception:
+        return 0
 
 def get_current_period(hire_d, ref_date=None):
     if ref_date is None:
@@ -140,7 +141,7 @@ def get_current_period(hire_d, ref_date=None):
     return start_date, end_date
 
 # ---------------------------------------------------------
-# UI 화면
+# UI 화면 구성
 # ---------------------------------------------------------
 st.title("🏢 근태 및 시간외근무 종합 대시보드")
 
@@ -150,14 +151,9 @@ if st.button("🔄 전체 데이터 새로고침"):
 
 st.markdown("---")
 
-# 수정된 시간외근무 열 구성
-ot_cols = [
-    "이름", "날짜", "시작시간", "종료시간", "근무시간", "근무내용",
-    "시간외수당수당적용시간", "통상임금적용시간", "대체휴무시간", "지급수당"
-]
-ot_df = load_sheet_data("시간외근무", ot_cols)
+# 1. 시간외근무 전체 데이터 로드 및 날짜 가공
+ot_df = load_sheet_raw_data("시간외근무")
 
-# 시간외근무 날짜 변환 (유연한 파싱)
 if not ot_df.empty and "날짜" in ot_df.columns:
     clean_ot_dates = ot_df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.replace("/", "-").str.strip()
     ot_df['date_dt'] = pd.to_datetime(clean_ot_dates, errors='coerce')
@@ -167,32 +163,34 @@ else:
 summary_list = []
 calendar_events = []
 categories = ["연차", "대체휴무", "병가", "공가"]
-leave_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
 
-# 현재 연도 (1월 1일 ~ 12월 31일)
+# 모든 근로자의 시간외수당 계산 기준일 (당해 연도 01-01 ~ 12-31)
 current_year = date.today().year
 ot_start_dt = pd.to_datetime(f"{current_year}-01-01")
 ot_end_dt = pd.to_datetime(f"{current_year}-12-31")
 
 for w in WORKERS:
-    df = load_sheet_data(w["name"], leave_cols)
+    # 2. 휴가 데이터 읽기 (개인별 탭)
+    df = load_sheet_raw_data(w["name"])
     p_start, p_end = get_current_period(w["hire_date"])
     p_start_dt = pd.to_datetime(p_start)
     p_end_dt = pd.to_datetime(p_end)
     
     cat_mins = {cat: 0 for cat in categories}
     
-    # 1. 휴가 항목 (입사일 산정주기 기준)
     if not df.empty and "날짜" in df.columns:
         clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.replace("/", "-").str.strip()
         df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce')
         
+        # 입사일 기준 산정주기 필터링
         period_df = df[(df['date_dt'] >= p_start_dt) & (df['date_dt'] <= p_end_dt)]
         for cat in categories:
-            cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
-            total_m = sum(calculate_net_minutes(r.get("시작시간", ""), r.get("종료시간", "")) for _, r in cat_df.iterrows())
-            cat_mins[cat] = total_m
+            if "구분" in period_df.columns:
+                cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
+                total_m = sum(calculate_net_minutes(r.get("시작시간", ""), r.get("종료시간", "")) for _, r in cat_df.iterrows())
+                cat_mins[cat] = total_m
 
+        # 일정표 이벤트 등록
         for idx, row in df.iterrows():
             if pd.isna(row.get('date_dt')):
                 continue
@@ -210,13 +208,13 @@ for w in WORKERS:
                     "textColor": "#FFFFFF"
                 })
 
-    # 2. 시간외수당 항목 (01-01 ~ 12-31 기준)
+    # 3. 시간외근무 데이터 계산 (01-01 ~ 12-31 기준)
     total_ot_pay_mins = 0
     total_ordinary_mins = 0
     total_ot_allowance = 0
 
-    if not ot_df.empty and 'date_dt' in ot_df.columns:
-        # 근로자 이름 및 1/1~12/31 날짜 필터링
+    if not ot_df.empty and 'date_dt' in ot_df.columns and '이름' in ot_df.columns:
+        # 근로자 이름 및 01-01~12-31 기간 필터링
         ot_worker_df = ot_df[
             (ot_df["이름"].astype(str).str.strip() == w["name"]) & 
             (ot_df["date_dt"] >= ot_start_dt) & 
@@ -226,29 +224,49 @@ for w in WORKERS:
         if not ot_worker_df.empty:
             ot_worker_df['year_month'] = ot_worker_df['date_dt'].dt.to_period('M')
             
+            # 열 위치 기반 추출 안전망 (컬럼명이 불분명할 때)
+            cols_list = list(ot_worker_df.columns)
+            
             for ym, group in ot_worker_df.groupby('year_month'):
                 monthly_ot_mins = 0
                 monthly_ord_mins = 0
                 
                 for _, row in group.iterrows():
-                    # 시간외수당 적용시간 값 찾기 (다양한 열 이름 대응)
-                    ot_val = row.get("시간외수당수당적용시간") or row.get("시간외수당적용시간") or row.get("수당적용시간") or "00:00"
-                    ord_val = row.get("통상임금적용시간") or row.get("통상임금 적용시간") or "00:00"
-                    
+                    # 시간외수당 적용시간 안전 탐색 (이름 기반 또는 7번째 컬럼)
+                    ot_val = None
+                    for key in ["시간외수당수당적용시간", "시간외수당적용시간", "수당적용시간"]:
+                        if key in row and pd.notna(row[key]):
+                            ot_val = row[key]
+                            break
+                    if ot_val is None and len(cols_list) >= 7:
+                        ot_val = row[cols_list[6]] # 7번째 열 (0-indexed 6)
+
+                    # 통상임금 적용시간 안전 탐색 (이름 기반 또는 8번째 컬럼)
+                    ord_val = None
+                    for key in ["통상임금적용시간", "통상임금 적용시간"]:
+                        if key in row and pd.notna(row[key]):
+                            ord_val = row[key]
+                            break
+                    if ord_val is None and len(cols_list) >= 8:
+                        ord_val = row[cols_list[7]] # 8번째 열 (0-indexed 7)
+
                     monthly_ot_mins += hhmm_to_minutes(ot_val)
                     monthly_ord_mins += hhmm_to_minutes(ord_val)
                     
-                    # 지급수당 금액 계산
-                    pay_str = str(row.get("지급수당", "0")).replace(",", "").replace("원", "").strip()
-                    try:
-                        total_ot_allowance += int(pay_str)
-                    except ValueError:
-                        pass
+                    # 지급수당 탐색 (이름 기반 또는 10번째 컬럼)
+                    pay_val = None
+                    if "지급수당" in row and pd.notna(row["지급수당"]):
+                        pay_val = row["지급수당"]
+                    elif len(cols_list) >= 10:
+                        pay_val = row[cols_list[9]]
+                        
+                    total_ot_allowance += parse_currency(pay_val)
                 
-                # 월 단위 1시간 미만 절사(버림)
+                # 월 단위 합산 후 1시간 미만 버림(절사)
                 total_ot_pay_mins += truncate_minutes_monthly(monthly_ot_mins)
                 total_ordinary_mins += truncate_minutes_monthly(monthly_ord_mins)
 
+    # 4. 요약 리스트 추가
     summary_list.append({
         "근로자명": w["name"],
         "입사일": w["hire_date"].strftime("%Y-%m-%d"),
@@ -261,14 +279,16 @@ for w in WORKERS:
         "통상임금 적용시간": minutes_to_hhmm(total_ordinary_mins),
         "시간외 총 지급수당": f"{total_ot_allowance:,}원"
     })
-if not ot_df.empty:
+
+# 달력 이벤트 추가 (시간외근무)
+if not ot_df.empty and 'date_dt' in ot_df.columns:
     for _, row in ot_df.iterrows():
-        if pd.isna(row['date_dt']):
+        if pd.isna(row.get('date_dt')):
             continue
-        w_name = str(row["이름"]).strip()
+        w_name = str(row.get("이름", "")).strip()
         d_str = row['date_dt'].strftime("%Y-%m-%d")
-        s_time = extract_time_str(row['시작시간'])
-        e_time = extract_time_str(row['종료시간'])
+        s_time = extract_time_str(row.get('시작시간', ''))
+        e_time = extract_time_str(row.get('종료시간', ''))
         w_color = WORKER_COLOR_MAP.get(w_name, "#4A5568")
         
         if ":" in s_time and ":" in e_time:
