@@ -10,7 +10,7 @@ import re
 # =========================================================
 WORKER_NAME = "채미혜"
 SHEET_NAME = WORKER_NAME
-HIRE_DATE = date(2018, 3, 1)
+HIRE_DATE = date(2018, 3, 1)  # 👈 실제 입사일에 맞게 수정하세요
 
 st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", page_icon="👤", layout="wide")
 
@@ -151,6 +151,11 @@ def save_to_sheet(payload):
 # UI 화면 구성
 # ---------------------------------------------------------
 st.title(f"👤 {WORKER_NAME} 근태 관리")
+
+# 🔄 구글 시트 즉시 동기화 버튼
+if st.button("🔄 구글 시트 데이터 즉시 동기화"):
+    st.cache_data.clear()
+    st.rerun()
 
 period_start, period_end = get_current_period(HIRE_DATE)
 st.caption(f"📅 **입사일:** {HIRE_DATE.strftime('%Y-%m-%d')} | **현재 산정 주기 (1년):** {period_start.strftime('%Y-%m-%d')} ~ {period_end.strftime('%Y-%m-%d')}")
