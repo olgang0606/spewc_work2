@@ -168,6 +168,11 @@ calendar_events = []
 categories = ["연차", "대체휴무", "병가", "공가"]
 leave_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
 
+# 모든 근로자의 시간외수당 적용 기준년도 (현재 년도 01-01 ~ 12-31)
+current_year = date.today().year
+ot_start_dt = pd.to_datetime(f"{current_year}-01-01")
+ot_end_dt = pd.to_datetime(f"{current_year}-12-31")
+
 for w in WORKERS:
     df = load_sheet_data(w["name"], leave_cols)
     p_start, p_end = get_current_period(w["hire_date"])
@@ -177,6 +182,7 @@ for w in WORKERS:
     
     cat_mins = {cat: 0 for cat in categories}
     
+    # 1. 휴가(연차, 대체휴무, 병가, 공가)는 입사일 산정주기 기준 집계
     if not df.empty and "날짜" in df.columns:
         clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
         df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce')
@@ -204,11 +210,11 @@ for w in WORKERS:
                     "textColor": "#FFFFFF"
                 })
 
-    # 시간외근무 개인별 산정주기 필터링
+    # 2. 시간외수당은 모든 근로자가 01-01 ~ 12-31 기준으로 필터링 및 집계
     ot_worker_df = ot_df[
         (ot_df["이름"].astype(str).str.strip() == w["name"]) & 
-        (ot_df["date_dt"] >= p_start_dt) & 
-        (ot_df["date_dt"] <= p_end_dt)
+        (ot_df["date_dt"] >= ot_start_dt) & 
+        (ot_df["date_dt"] <= ot_end_dt)
     ]
     
     total_ot_pay_mins = 0
@@ -220,7 +226,6 @@ for w in WORKERS:
         ot_worker_df['year_month'] = ot_worker_df['date_dt'].dt.to_period('M')
         
         for ym, group in ot_worker_df.groupby('year_month'):
-            # 컬럼명 다양성 방어 코드 (시간외수당수당적용시간 or 수당적용시간)
             ot_col_name = "시간외수당수당적용시간" if "시간외수당수당적용시간" in group.columns else "수당적용시간"
             ord_col_name = "통상임금적용시간"
             
@@ -250,7 +255,6 @@ for w in WORKERS:
         "통상임금 적용시간": minutes_to_hhmm(total_ordinary_mins),
         "시간외 총 지급수당": f"{total_ot_allowance:,}원"
     })
-
 if not ot_df.empty:
     for _, row in ot_df.iterrows():
         if pd.isna(row['date_dt']):
