@@ -8,50 +8,36 @@ from streamlit_calendar import calendar
 
 st.set_page_config(page_title="근태 및 시간외근무 관리 시스템", page_icon="🏢", layout="wide")
 
+# 근로자 정보 (추후 단가 전달 시 아래 맵에 금액을 채워넣을 수 있습니다)
 WORKERS = [
-    {"name": "박은경", "hire_date": date(2016, 3, 1), "color": "#3182CE", "wage": 29740},
-    {"name": "채미혜", "hire_date": date(2018, 3, 1), "color": "#38A169", "wage": 24540},
-    {"name": "박인미", "hire_date": date(2023, 8, 1), "color": "#00B5D8", "wage": 20890},
-    {"name": "조윤희", "hire_date": date(2023, 8, 1), "color": "#DD6B20", "wage": 21270},
-    {"name": "성지영", "hire_date": date(2026, 7, 1), "color": "#805AD5", "wage": 18960},
+    {"name": "박은경", "hire_date": date(2016, 3, 1), "color": "#3182CE"},
+    {"name": "채미혜", "hire_date": date(2018, 3, 1), "color": "#38A169"},
+    {"name": "박인미", "hire_date": date(2023, 8, 1), "color": "#00B5D8"},
+    {"name": "조윤희", "hire_date": date(2023, 8, 1), "color": "#DD6B20"},
+    {"name": "성지영", "hire_date": date(2026, 7, 1), "color": "#805AD5"},
 ]
 
-WORKER_WAGE_MAP = {w["name"]: w["wage"] for w in WORKERS}
+# 단가 매핑 (추후 알려주시는 금액으로 업데이트 가능)
+OVERTIME_WAGE_MAP = {w["name"]: 0 for w in WORKERS}
+ORDINARY_WAGE_MAP = {w["name"]: 0 for w in WORKERS}
 WORKER_COLOR_MAP = {w["name"]: w["color"] for w in WORKERS}
 
 # ---------------------------------------------------------
-# 한국 주요 법정/대체 공휴일 판별 함수 (패키지 미사용)
+# 한국 주요 법정/대체 공휴일 판별 함수
 # ---------------------------------------------------------
 def is_korean_holiday(target_date):
-    """주요 고정 공휴일 및 명절/대체공휴일 판별"""
     if isinstance(target_date, datetime):
         target_date = target_date.date()
-        
     m, d = target_date.month, target_date.day
-    
-    # 1. 고정 양력 공휴일
-    fixed_holidays = [
-        (1, 1),   # 신정
-        (3, 1),   # 삼일절
-        (5, 5),   # 어린이날
-        (6, 6),   # 현충일
-        (8, 15),  # 광복절
-        (10, 3),  # 개천절
-        (10, 9),  # 한글날
-        (12, 25)  # 성탄절
-    ]
+    fixed_holidays = [(1, 1), (3, 1), (5, 5), (6, 6), (8, 15), (10, 3), (10, 9), (12, 25)]
     if (m, d) in fixed_holidays:
         return True
-        
-    # 2. 연도별 주요 음력 명절/석가탄신일/대체공휴일 지정 (필요시 연도 추가 가능)
     variable_holidays = {
         2024: [(2, 9), (2, 10), (2, 12), (4, 10), (5, 15), (9, 16), (9, 17), (9, 18)],
         2025: [(1, 28), (1, 29), (1, 30), (3, 3), (5, 5), (5, 6), (10, 5), (10, 6), (10, 7), (10, 8)],
         2026: [(2, 16), (2, 17), (2, 18), (3, 2), (5, 24), (5, 25), (9, 24), (9, 25), (9, 26), (10, 5)]
     }
-    
-    year_holidays = variable_holidays.get(target_date.year, [])
-    return (m, d) in year_holidays
+    return (m, d) in variable_holidays.get(target_date.year, [])
 
 # ---------------------------------------------------------
 # Google Sheets API 연동
@@ -86,7 +72,7 @@ def load_sheet_data(sheet_name, target_cols):
         return pd.DataFrame(columns=target_cols)
 
 # ---------------------------------------------------------
-# 시간 및 유틸리티 함수
+# 시간 계산 및 유틸리티 함수
 # ---------------------------------------------------------
 def extract_time_str(val):
     s = str(val).strip().replace("'", "").replace('"', '')
@@ -96,25 +82,18 @@ def extract_time_str(val):
 def calculate_net_minutes(start_str, end_str):
     s_hhmm = extract_time_str(start_str)
     e_hhmm = extract_time_str(end_str)
-    
     if not s_hhmm or not e_hhmm:
         return 0
-        
     try:
         s_dt = datetime.strptime(s_hhmm, "%H:%M")
         e_dt = datetime.strptime(e_hhmm, "%H:%M")
-        
         if e_dt <= s_dt:
             return 0
-            
         total_mins = int((e_dt - s_dt).total_seconds() // 60)
-        
         lunch_start = datetime.strptime("12:00", "%H:%M")
         lunch_end = datetime.strptime("13:00", "%H:%M")
-        
         if s_dt <= lunch_start and e_dt >= lunch_end:
             total_mins -= 60
-            
         return max(0, total_mins)
     except Exception:
         return 0
@@ -132,6 +111,10 @@ def hhmm_to_minutes(hhmm_str):
         return h * 60 + m
     except Exception:
         return 0
+
+def truncate_minutes_monthly(mins):
+    """월 단위 합산 후 1시간 미만(분 단위) 버림"""
+    return (mins // 60) * 60
 
 def get_current_period(hire_d, ref_date=None):
     if ref_date is None:
@@ -154,8 +137,6 @@ def get_current_period(hire_d, ref_date=None):
             start_date = date(ref_date.year - 1, hire_d.month, 28)
         end_date = this_year_hire - timedelta(days=1)
         
-    if isinstance(end_date, pd.Timestamp):
-        end_date = end_date.date()
     return start_date, end_date
 
 # ---------------------------------------------------------
@@ -169,12 +150,15 @@ if st.button("🔄 전체 데이터 새로고침"):
 
 st.markdown("---")
 
-ot_cols = ["이름", "날짜", "시작시간", "종료시간", "근무시간", "근무내용", "수당적용시간", "대체휴무시간", "지급수당"]
+# 수정된 시간외근무 열 구성
+ot_cols = [
+    "이름", "날짜", "시작시간", "종료시간", "근무시간", "근무내용",
+    "시간외수당수당적용시간", "통상임금적용시간", "대체휴무시간", "지급수당"
+]
 ot_df = load_sheet_data("시간외근무", ot_cols)
 
 if not ot_df.empty and "날짜" in ot_df.columns:
     clean_ot_dates = ot_df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
-    # .dt.date 대신 datetime64[ns] 타입으로 유지
     ot_df['date_dt'] = pd.to_datetime(clean_ot_dates, errors='coerce')
 else:
     ot_df['date_dt'] = pd.NaT
@@ -188,7 +172,6 @@ for w in WORKERS:
     df = load_sheet_data(w["name"], leave_cols)
     p_start, p_end = get_current_period(w["hire_date"])
     
-    # 비교를 위한 Timestamp 변환
     p_start_dt = pd.to_datetime(p_start)
     p_end_dt = pd.to_datetime(p_end)
     
@@ -198,7 +181,6 @@ for w in WORKERS:
         clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
         df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce')
         
-        # 개인 휴가 산정주기 필터링
         period_df = df[(df['date_dt'] >= p_start_dt) & (df['date_dt'] <= p_end_dt)]
         for cat in categories:
             cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
@@ -222,25 +204,34 @@ for w in WORKERS:
                     "textColor": "#FFFFFF"
                 })
 
-    # 시간외근무 필터링 (p_start_dt, p_end_dt 적용으로 에러 해결!)
+    # 시간외근무 필터링
     ot_worker_df = ot_df[
         (ot_df["이름"].astype(str).str.strip() == w["name"]) & 
         (ot_df["date_dt"] >= p_start_dt) & 
         (ot_df["date_dt"] <= p_end_dt)
     ]
     
+    # 월별 그룹화하여 1시간 미만 버림 적용 계산
+    ot_worker_df['year_month'] = ot_worker_df['date_dt'].dt.to_period('M')
+    
     total_ot_pay_mins = 0
+    total_ordinary_mins = 0
     total_ot_allowance = 0
     
-    for _, row in ot_worker_df.iterrows():
-        pay_mins = hhmm_to_minutes(row["수당적용시간"])
-        total_ot_pay_mins += pay_mins
+    for ym, group in ot_worker_df.groupby('year_month'):
+        monthly_ot_mins = sum(hhmm_to_minutes(r["시간외수당수당적용시간"]) for _, r in group.iterrows())
+        monthly_ord_mins = sum(hhmm_to_minutes(r["통상임금적용시간"]) for _, r in group.iterrows())
         
-        try:
-            pay_val = int(str(row["지급수당"]).replace(",", "").replace("원", "").strip())
-        except Exception:
-            pay_val = int((pay_mins / 60) * w["wage"])
-        total_ot_allowance += pay_val
+        # 월 단위 합산 후 1시간 미만 절사(버림)
+        total_ot_pay_mins += truncate_minutes_monthly(monthly_ot_mins)
+        total_ordinary_mins += truncate_minutes_monthly(monthly_ord_mins)
+        
+        for _, row in group.iterrows():
+            try:
+                pay_val = int(str(row["지급수당"]).replace(",", "").replace("원", "").strip())
+            except Exception:
+                pay_val = 0
+            total_ot_allowance += pay_val
 
     summary_list.append({
         "근로자명": w["name"],
@@ -250,7 +241,8 @@ for w in WORKERS:
         "대체휴무 시간": minutes_to_hhmm(cat_mins["대체휴무"]),
         "병가 시간": minutes_to_hhmm(cat_mins["병가"]),
         "공가 시간": minutes_to_hhmm(cat_mins["공가"]),
-        "시간외 수당적용시간": minutes_to_hhmm(total_ot_pay_mins),
+        "시간외수당 적용시간": minutes_to_hhmm(total_ot_pay_mins),
+        "통상임금 적용시간": minutes_to_hhmm(total_ordinary_mins),
         "시간외 총 지급수당": f"{total_ot_allowance:,}원"
     })
 
@@ -273,7 +265,7 @@ if not ot_df.empty:
                 "textColor": "#FFFFFF"
             })
 
-st.subheader("📊 근로자별 산정주기 누적 사용 현황")
+st.subheader("📊 근로자별 산정주기 누적 사용 현황 (휴가, 통상임금 및 시간외 수당)")
 st.dataframe(pd.DataFrame(summary_list), use_container_width=True, hide_index=True)
 
 st.markdown("---")
