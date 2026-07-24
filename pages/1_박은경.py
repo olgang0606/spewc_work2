@@ -8,14 +8,14 @@ import re
 # =========================================================
 # 
 # =========================================================
-WORKER_NAME = "박은경"
+WORKER_NAME = "박은경"  # 파일별 변경
 SHEET_NAME = WORKER_NAME
 HIRE_DATE = date(2016, 3, 1)
 
 st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", page_icon="👤", layout="wide")
 
 # ---------------------------------------------------------
-# 입사일 기준 현재 산정 주기(1년) 계산 함수
+# 입사일 기준 현재 산정 주기(1년) 계산
 # ---------------------------------------------------------
 def get_current_period(hire_d, ref_date=None):
     if ref_date is None:
@@ -23,7 +23,7 @@ def get_current_period(hire_d, ref_date=None):
     
     try:
         this_year_hire = date(ref_date.year, hire_d.month, hire_d.day)
-    except ValueError: # 윤년 예외 처리
+    except ValueError:
         this_year_hire = date(ref_date.year, hire_d.month, 28)
         
     if ref_date >= this_year_hire:
@@ -45,22 +45,36 @@ def get_current_period(hire_d, ref_date=None):
     return start_date, end_date
 
 # ---------------------------------------------------------
-# 시간 계산 및 정제 헬퍼 함수
+# 시간 정제 및 계산 헬퍼 함수
 # ---------------------------------------------------------
 def clean_str(val):
     if pd.isna(val) or val is None:
         return ""
     return str(val).strip().replace("'", "").replace('"', '')
 
+def extract_time_str(val):
+    """Sat Dec 30 1899 09:00:00 GMT... 형태에서 09:00 형태만 안전하게 추출"""
+    s = clean_str(val)
+    match = re.search(r'(\d{1,2}:\d{2})', s)
+    if match:
+        return match.group(1)
+    return s
+
+def extract_date_str(val):
+    """2026-07-24 형태의 날짜 추출"""
+    s = clean_str(val)
+    match = re.search(r'(\d{4}-\d{2}-\d{2})', s)
+    if match:
+        return match.group(1)
+    return s
+
 def hhmm_to_minutes(s):
     try:
-        val_str = clean_str(s)
+        val_str = extract_time_str(s)
         if not val_str or ":" not in val_str:
             return 0
-        match = re.search(r'(\d{1,2}):(\d{1,2})', val_str)
-        if match:
-            return int(match.group(1)) * 60 + int(match.group(2))
-        return 0
+        parts = val_str.split(":")
+        return int(parts[0]) * 60 + int(parts[1])
     except:
         return 0
 
@@ -68,7 +82,7 @@ def minutes_to_hhmm(mins):
     mins = max(0, int(mins))
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
-# 12:00~13:00 점심시간 차감 로직
+# 점심시간(12:00~13:00) 차감 계산
 def calculate_net_minutes(start_str, end_str):
     try:
         fmt = "%H:%M"
@@ -109,6 +123,7 @@ def load_data(sheet_name):
         
         df_res = pd.DataFrame(data[1:], columns=data[0])
         
+        # 필드별 데이터 정제
         for col in df_res.columns:
             df_res[col] = df_res[col].apply(clean_str)
             
@@ -116,7 +131,14 @@ def load_data(sheet_name):
             if c not in df_res.columns:
                 df_res[c] = ""
                 
-        df_res = df_res[target_cols]
+        df_res = df_res[target_cols].copy()
+        
+        # 이상 포맷 텍스트 정상화
+        df_res["날짜"] = df_res["날짜"].apply(extract_date_str)
+        df_res["시작시간"] = df_res["시작시간"].apply(extract_time_str)
+        df_res["종료시간"] = df_res["종료시간"].apply(extract_time_str)
+        df_res["총시간"] = df_res["총시간"].apply(extract_time_str)
+        
         df_res = df_res[df_res["날짜"] != ""].copy()
         return df_res
     except:
@@ -154,7 +176,6 @@ else:
 for i, cat in enumerate(categories):
     t_mins = 0
     if not period_df.empty and "구분" in period_df.columns and "총시간" in period_df.columns:
-        # 공백 제거 후 정확한 조건 비교
         cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
         for val in cat_df["총시간"]:
             t_mins += hhmm_to_minutes(val)
@@ -163,29 +184,28 @@ for i, cat in enumerate(categories):
 
 st.markdown("---")
 
-# 2. 근무 / 휴가 신청 작성 폼 (입력 필드 정돈)
+# 2. 신청 폼
 st.subheader("📝 근무 / 휴가 신청 작성")
 
 with st.form("entry_form"):
-    row1_1, row1_2, row1_3 = st.columns(3)
-    with row1_1:
+    r1_1, r1_2, r1_3 = st.columns(3)
+    with r1_1:
         req_date = st.date_input("날짜", date.today())
-    with row1_2:
+    with r1_2:
         start_t = st.time_input("시작시간", datetime.strptime("09:00", "%H:%M").time(), step=1800)
-    with row1_3:
+    with r1_3:
         end_t = st.time_input("종료시간", datetime.strptime("18:00", "%H:%M").time(), step=1800)
 
-    row2_1, row2_2, row2_3 = st.columns(3)
-    with row2_1:
+    r2_1, r2_2, r2_3 = st.columns(3)
+    with r2_1:
         category = st.selectbox("구분", categories)
-    with row2_2:
+    with r2_2:
         destination = st.text_input("목적지")
-    with row2_3:
+    with r2_3:
         reason = st.text_input("사유")
 
     submit = st.form_submit_button("시트에 저장하기")
 
-# 저장 처리
 if submit:
     s_str = start_t.strftime("%H:%M")
     e_str = end_t.strftime("%H:%M")
@@ -195,8 +215,6 @@ if submit:
         st.error("종료시간은 시작시간보다 나중이어야 하며, 점심시간(12:00~13:00) 외 실근무 시간이 포함되어야 합니다.")
     else:
         total_hhmm = minutes_to_hhmm(net_mins)
-        
-        # 구글 시트 저장 데이터 패킷 (파라미터 명칭 명확화)
         payload = {
             "sheetName": SHEET_NAME,
             "날짜": req_date.strftime("%Y-%m-%d"),
@@ -219,7 +237,7 @@ if submit:
 
 st.markdown("---")
 
-# 3. 개인별 신청 전체 기록
+# 3. 전체 기록
 st.subheader(f"📋 {WORKER_NAME} 신청 전체 기록")
 if not df.empty:
     disp_df = df.drop(columns=['date_dt'], errors='ignore')
