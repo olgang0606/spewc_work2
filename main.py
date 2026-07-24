@@ -14,13 +14,13 @@ st.set_page_config(
 WORKERS = ["박은경", "채미혜", "박인미", "조윤희", "성지영"]
 CATEGORIES = ["연차", "대체휴무", "병가", "공가"]
 
-# 근로자별 달력 배색 지정
+# 🎨 요청하신 근로자별 색상 계열 설정
 COLOR_MAP = {
-    "박은경": "#FF6B6B", # 빨강 계열
-    "채미혜": "#4ECDC4", # 민트 계열
-    "박인미": "#45B7D1", # 파랑 계열
-    "조윤희": "#FFA07A", # 주황 계열
-    "성지영": "#98D8C8"  # 연녹색 계열
+    "박은경": "#3563E9", # 파랑 계열
+    "채미혜": "#2E7D32", # 초록 계열
+    "박인미": "#38BDF8", # 하늘색 계열
+    "조윤희": "#FF7A00", # 주황색 계열
+    "성지영": "#8B5CF6"  # 보라색 계열
 }
 
 # ---------------------------------------------------------
@@ -48,7 +48,7 @@ def minutes_to_hhmm(mins):
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
 # ---------------------------------------------------------
-# 구글 시트 전체 데이터 데이터 로드
+# 구글 시트 전체 데이터 로드
 # ---------------------------------------------------------
 @st.cache_data(ttl=1)
 def load_all_worker_data():
@@ -72,14 +72,12 @@ raw_data = load_all_worker_data()
 # 1. 근로자 5명 구분별 사용시간 합계 요약표
 st.subheader("📊 근로자별 근무/휴가 유형 합계 요약")
 
-# 요약 데이터 프레임 생성
 summary_list = []
 for worker in WORKERS:
     worker_rows = [r for r in raw_data if r.get("근로자명") == worker]
     
     worker_summary = {"근로자명": worker}
     for cat in CATEGORIES:
-        # 해당 구분의 총 시간(분) 합산
         total_mins = sum(
             hhmm_to_minutes(r.get("총시간", "")) 
             for r in worker_rows 
@@ -108,7 +106,6 @@ for item in raw_data:
     reason = item.get("사유", "")
 
     if date_str:
-        # 달력 카드 타이틀 구성
         title = f"[{worker}] {category}"
         if start_t and end_t:
             title += f" ({start_t}~{end_t})"
@@ -129,7 +126,6 @@ for item in raw_data:
             }
         })
 
-# 달력 컴포넌트 옵션 설정
 calendar_options = {
     "headerToolbar": {
         "left": "prev,next today",
@@ -148,10 +144,16 @@ else:
     st.info("등록된 일정 데이터가 없거나 시트 연결을 확인해야 합니다.")
 
 st.markdown("---")
-st.markdown("💡 **근로자별 범례:** " + " | ".join([f"{color_code} {name}" for name, color_code in [
-    ("🔴 박은경", "#45B7D1"),
-    ("🟢 채미혜", "#98D8C8"),
-    ("🔵 박인미", "#4ECDC4"),
-    ("🟠 조윤희", "#FFA07A"),
-    ("🟢 성지영", "#FF6B6B")
-]]))
+
+# 범례 HTML/CSS 구성 (색상 박스 형태)
+legend_html = """
+<div style="display: flex; gap: 15px; flex-wrap: wrap; align-items: center; font-size: 15px;">
+    <strong>💡 근로자별 범례:</strong>
+    <span style="display: inline-flex; align-items: center;"><span style="width: 12px; height: 12px; background-color: #3563E9; display: inline-block; border-radius: 50%; margin-right: 5px;"></span>박은경 (파랑)</span>
+    <span style="display: inline-flex; align-items: center;"><span style="width: 12px; height: 12px; background-color: #2E7D32; display: inline-block; border-radius: 50%; margin-right: 5px;"></span>채미혜 (초록)</span>
+    <span style="display: inline-flex; align-items: center;"><span style="width: 12px; height: 12px; background-color: #38BDF8; display: inline-block; border-radius: 50%; margin-right: 5px;"></span>박인미 (하늘)</span>
+    <span style="display: inline-flex; align-items: center;"><span style="width: 12px; height: 12px; background-color: #FF7A00; display: inline-block; border-radius: 50%; margin-right: 5px;"></span>조윤희 (주황)</span>
+    <span style="display: inline-flex; align-items: center;"><span style="width: 12px; height: 12px; background-color: #8B5CF6; display: inline-block; border-radius: 50%; margin-right: 5px;"></span>성지영 (보라)</span>
+</div>
+"""
+st.markdown(legend_html, unsafe_allow_html=True)
