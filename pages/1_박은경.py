@@ -5,18 +5,15 @@ from datetime import datetime, date
 import time
 import re
 
-st.set_page_config(page_title="박은경 근무 관리", layout="wide")
-
 # ---------------------------------------------------------
-# 근로자 정보 및 시트 설정
+# 근로자별 설정 (각 파일별로 WORKER_NAME 수정)
 # ---------------------------------------------------------
 WORKER_NAME = "박은경"
-SHEET_NAME = "박은경"
+SHEET_NAME = WORKER_NAME
 HIRE_DATE = date(2016, 3, 1)
 
-# ---------------------------------------------------------
-# 시간 정제 및 연산 함수
-# ---------------------------------------------------------
+st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", layout="wide")
+
 def clean_str(val):
     if pd.isna(val) or val is None:
         return ""
@@ -29,27 +26,20 @@ def hhmm_to_minutes(s):
             return 0
         match = re.search(r'(\d{1,2}):(\d{1,2})', val_str)
         if match:
-            h = int(match.group(1))
-            m = int(match.group(2))
-            return h * 60 + m
+            return int(match.group(1)) * 60 + int(match.group(2))
         return 0
     except:
         return 0
 
 def minutes_to_hhmm(mins):
     mins = max(0, int(mins))
-    h = mins // 60
-    m = mins % 60
-    return f"{h:02d}:{m:02d}"
+    return f"{mins // 60:02d}:{mins % 60:02d}"
 
 def calculate_net_minutes(start_str, end_str):
     try:
         fmt = "%H:%M"
-        s_clean = minutes_to_hhmm(hhmm_to_minutes(start_str))
-        e_clean = minutes_to_hhmm(hhmm_to_minutes(end_str))
-        
-        t_start = datetime.strptime(s_clean, fmt)
-        t_end = datetime.strptime(e_clean, fmt)
+        t_start = datetime.strptime(start_str, fmt)
+        t_end = datetime.strptime(end_str, fmt)
         
         if t_end <= t_start:
             return 0
@@ -71,59 +61,30 @@ def calculate_net_minutes(start_str, end_str):
     except:
         return 0
 
-def get_annual_leave_hours(hire_d, target_d=None):
-    if target_d is None:
-        target_d = date.today()
-        
-    years = target_d.year - hire_d.year
-    if (target_d.month, target_d.day) < (hire_d.month, hire_d.day):
-        years -= 1
-        
-    if years < 0:
-        return 0
-    elif years == 0:
-        months = (target_d.year - hire_d.year) * 12 + target_d.month - hire_d.month
-        if target_d.day < hire_d.day:
-            months -= 1
-        return min(max(0, months), 11) * 8
-    else:
-        add_days = (years - 1) // 2
-        return min(15 + add_days, 25) * 8
-
-# ---------------------------------------------------------
-# 구글 시트 연동 함수
-# ---------------------------------------------------------
 @st.cache_data(ttl=1)
 def load_data(sheet_name):
-    target_columns = ["근로자명", "날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
+    target_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
     try:
         sheet_url = st.secrets["SHEET_URL"]
         res = requests.get(sheet_url, params={"sheetName": sheet_name})
         data = res.json()
         if not data or len(data) < 2:
-            return pd.DataFrame(columns=target_columns)
+            return pd.DataFrame(columns=target_cols)
         
-        # 헤더와 데이터 분리
         df_res = pd.DataFrame(data[1:], columns=data[0])
         
-        # 데이터 내 문자열 공백 정제
         for col in df_res.columns:
             df_res[col] = df_res[col].apply(clean_str)
             
-        # 컬럼 존재 여부 체크 및 보장
-        for col in target_columns:
-            if col not in df_res.columns:
-                df_res[col] = ""
+        for c in target_cols:
+            if c not in df_res.columns:
+                df_res[c] = ""
                 
-        # 컬럼 순서 고정
-        df_res = df_res[target_columns]
-        
-        # 유효 행 필터링
-        df_res = df_res[(df_res["근로자명"] != "") | (df_res["날짜"] != "")].copy()
-            
+        df_res = df_res[target_cols]
+        df_res = df_res[df_res["날짜"] != ""].copy()
         return df_res
     except:
-        return pd.DataFrame(columns=target_columns)
+        return pd.DataFrame(columns=target_cols)
 
 def save_to_sheet(payload):
     try:
@@ -133,36 +94,27 @@ def save_to_sheet(payload):
     except:
         return False
 
-# ---------------------------------------------------------
-# UI 구성
-# ---------------------------------------------------------
-st.title(f"👤 {WORKER_NAME} 근태 및 휴가 관리")
-st.write(f"**입사일:** {HIRE_DATE.strftime('%Y-%m-%d')}")
-
-annual_hours = get_annual_leave_hours(HIRE_DATE)
-st.metric("해당연도 부여 연차시간", f"{annual_hours}시간 (08:00 기준 {annual_hours // 8}일)")
-
+# UI
+st.title(f"👤 {WORKER_NAME} 근태 관리")
 st.markdown("---")
 
-# 시트 데이터 불러오기
 df = load_data(SHEET_NAME)
 
 categories = ["연차", "대체휴무", "병가", "공가"]
 
-# 요약 지표 출력 및 합계 누적
+# 상단 지표 계산 (A~G열 7개 구조 기반)
 cols = st.columns(4)
 for i, cat in enumerate(categories):
     t_mins = 0
     if not df.empty and "구분" in df.columns and "총시간" in df.columns:
-        cat_records = df[df["구분"].astype(str).str.strip() == cat]
-        for val in cat_records["총시간"]:
+        cat_df = df[df["구분"].str.strip() == cat]
+        for val in cat_df["총시간"]:
             t_mins += hhmm_to_minutes(val)
             
     cols[i].metric(f"총 {cat} 시간", minutes_to_hhmm(t_mins))
 
 st.markdown("---")
 
-# 입력 폼
 st.subheader("📝 근무 / 휴가 신청 작성")
 with st.form("entry_form"):
     c1, c2, c3 = st.columns(3)
@@ -189,7 +141,6 @@ if submit:
         total_hhmm = minutes_to_hhmm(net_mins)
         payload = {
             "sheetName": SHEET_NAME,
-            "근로자명": WORKER_NAME,
             "날짜": req_date.strftime("%Y-%m-%d"),
             "시작시간": s_str,
             "종료시간": e_str,
@@ -206,12 +157,11 @@ if submit:
                 st.success(f"성공적으로 저장되었습니다! (인정 시간: {total_hhmm})")
                 st.rerun()
             else:
-                st.error("저장에 실패했습니다. SHEET_URL 배포 상태를 확인하세요.")
+                st.error("저장에 실패했습니다.")
 
 st.markdown("---")
 
-# 개인 신청 기록
-st.subheader("📋 개인 신청 전체 기록")
+st.subheader(f"📋 {WORKER_NAME} 신청 전체 기록")
 if not df.empty:
     st.dataframe(df, use_container_width=True)
 else:
