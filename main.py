@@ -32,7 +32,7 @@ def get_gspread_client():
     )
     return gspread.authorize(credentials)
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=3) # 수시 입력을 위해 캐시 주기 3초 설정
 def load_worker_data(sheet_name):
     target_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
     try:
@@ -51,7 +51,7 @@ def load_worker_data(sheet_name):
         return pd.DataFrame(columns=target_cols)
 
 # ---------------------------------------------------------
-# 시간 및 날짜 처리 함수 (24시간제 적용)
+# 시간 및 날짜 처리 함수 (24시간제 & 점심시간 차감)
 # ---------------------------------------------------------
 def extract_time_str(val):
     """HH:MM:SS 또는 HH:MM 형태에서 24시간제 HH:MM만 추출"""
@@ -96,7 +96,6 @@ def minutes_to_hhmm(mins):
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
 def get_current_period(hire_d, ref_date=None):
-    """입사일 기준 현재 산정주기 계산"""
     if ref_date is None:
         ref_date = date.today()
     try:
@@ -202,7 +201,7 @@ st.dataframe(summary_df, use_container_width=True, hide_index=True)
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 📅 월간 달력 일정표 (24시간제 표기 적용)
+# 📅 월간 달력 일정표
 # ---------------------------------------------------------
 st.subheader("📅 월간 근태 일정표")
 
@@ -226,7 +225,6 @@ calendar_options = {
     },
     "initialView": "dayGridMonth",
     "locale": "ko",
-    # ✨ 24시간제 표기 옵션 추가
     "eventTimeFormat": {
         "hour": "2-digit",
         "minute": "2-digit",
