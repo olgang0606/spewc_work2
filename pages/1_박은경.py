@@ -1,26 +1,62 @@
 import streamlit as st
 import pandas as pd
-import requests
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 import time
 import re
 
-# =========================================================
-# 👤 근로자 및 입사일 설정
-# =========================================================
 WORKER_NAME = "박은경"
 SHEET_NAME = WORKER_NAME
-HIRE_DATE = date(2016, 3, 1)  # 👈 실제 입사일에 맞게 수정하세요
+HIRE_DATE = date(2016, 3, 1)
 
 st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", page_icon="👤", layout="wide")
 
-# ---------------------------------------------------------
-# 입사일 기준 현재 산정 주기(1년) 계산
-# ---------------------------------------------------------
+@st.cache_resource
+def get_gspread_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    credentials = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=scopes
+    )
+    return gspread.authorize(credentials)
+
+@st.cache_data(ttl=1)
+def load_data(sheet_name):
+    target_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
+    try:
+        gc = get_gspread_client()
+        sh = gc.open_by_url(st.secrets["SPREADSHEET_URL"])
+        worksheet = sh.worksheet(sheet_name)
+        records = worksheet.get_all_records()
+        if not records:
+            return pd.DataFrame(columns=target_cols)
+        df_res = pd.DataFrame(records)
+        for c in target_cols:
+            if c not in df_res.columns:
+                df_res[c] = ""
+        return df_res[target_cols].copy()
+    except Exception as e:
+        return pd.DataFrame(columns=target_cols)
+
+def save_to_sheet(sheet_name, row_data):
+    try:
+        gc = get_gspread_client()
+        sh = gc.open_by_url(st.secrets["SPREADSHEET_URL"])
+        worksheet = sh.worksheet(sheet_name)
+        # USER_ENTERED 옵션을 통해 구글 시트가 수식 및 시간 서식을 올바르게 자동 인식하도록 유도
+        worksheet.append_row(row_data, value_input_option="USER_ENTERED")
+        return True
+    except Exception as e:
+        st.error(f"저장 오류: {e}")
+        return False
+
 def get_current_period(hire_d, ref_date=None):
     if ref_date is None:
         ref_date = date.today()
-    
     try:
         this_year_hire = date(ref_date.year, hire_d.month, hire_d.day)
     except ValueError:
@@ -41,30 +77,12 @@ def get_current_period(hire_d, ref_date=None):
         
     if isinstance(end_date, pd.Timestamp):
         end_date = end_date.date()
-        
     return start_date, end_date
 
-# ---------------------------------------------------------
-# 시간 정제 및 계산 헬퍼 함수
-# ---------------------------------------------------------
-def clean_str(val):
-    if pd.isna(val) or val is None:
-        return ""
-    return str(val).strip().replace("'", "").replace('"', '')
-
 def extract_time_str(val):
-    s = clean_str(val)
+    s = str(val).strip().replace("'", "").replace('"', '')
     match = re.search(r'(\d{1,2}:\d{2})', s)
-    if match:
-        return match.group(1)
-    return s
-
-def extract_date_str(val):
-    s = clean_str(val)
-    match = re.search(r'(\d{4}-\d{2}-\d{2})', s)
-    if match:
-        return match.group(1)
-    return s
+    return match.group(1) if match else s
 
 def hhmm_to_minutes(s):
     try:
@@ -85,74 +103,23 @@ def calculate_net_minutes(start_str, end_str):
         fmt = "%H:%M"
         t_start = datetime.strptime(start_str, fmt)
         t_end = datetime.strptime(end_str, fmt)
-        
         if t_end <= t_start:
             return 0
-        
         total_mins = int((t_end - t_start).total_seconds() // 60)
-        
         lunch_start = datetime.strptime("12:00", fmt)
         lunch_end = datetime.strptime("13:00", fmt)
-        
         overlap_start = max(t_start, lunch_start)
         overlap_end = min(t_end, lunch_end)
-        
         if overlap_start < overlap_end:
             overlap_mins = int((overlap_end - overlap_start).total_seconds() // 60)
             total_mins -= overlap_mins
-            
         return max(0, total_mins)
     except:
         return 0
 
-# ---------------------------------------------------------
-# 구글 시트 연동 함수
-# ---------------------------------------------------------
-@st.cache_data(ttl=1)
-def load_data(sheet_name):
-    target_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
-    try:
-        sheet_url = st.secrets["SHEET_URL"]
-        res = requests.get(sheet_url, params={"sheetName": sheet_name})
-        data = res.json()
-        if not data or len(data) < 2:
-            return pd.DataFrame(columns=target_cols)
-        
-        df_res = pd.DataFrame(data[1:], columns=data[0])
-        
-        for col in df_res.columns:
-            df_res[col] = df_res[col].apply(clean_str)
-            
-        for c in target_cols:
-            if c not in df_res.columns:
-                df_res[c] = ""
-                
-        df_res = df_res[target_cols].copy()
-        
-        df_res["날짜"] = df_res["날짜"].apply(extract_date_str)
-        df_res["시작시간"] = df_res["시작시간"].apply(extract_time_str)
-        df_res["종료시간"] = df_res["종료시간"].apply(extract_time_str)
-        df_res["총시간"] = df_res["총시간"].apply(extract_time_str)
-        
-        df_res = df_res[df_res["날짜"] != ""].copy()
-        return df_res
-    except:
-        return pd.DataFrame(columns=target_cols)
-
-def save_to_sheet(payload):
-    try:
-        sheet_url = st.secrets["SHEET_URL"]
-        res = requests.get(sheet_url, params=payload)
-        return res.status_code == 200
-    except:
-        return False
-
-# ---------------------------------------------------------
-# UI 화면 구성
-# ---------------------------------------------------------
+# UI 구성
 st.title(f"👤 {WORKER_NAME} 근태 관리")
 
-# 🔄 구글 시트 즉시 동기화 버튼
 if st.button("🔄 구글 시트 데이터 즉시 동기화"):
     st.cache_data.clear()
     st.rerun()
@@ -164,9 +131,7 @@ st.markdown("---")
 df = load_data(SHEET_NAME)
 categories = ["연차", "대체휴무", "병가", "공가"]
 
-# 1. 상단 누적 요약 지표
 cols = st.columns(4)
-
 if not df.empty and "날짜" in df.columns:
     df['date_dt'] = pd.to_datetime(df['날짜'], errors='coerce').dt.date
     period_df = df[(df['date_dt'] >= period_start) & (df['date_dt'] <= period_end)]
@@ -179,12 +144,10 @@ for i, cat in enumerate(categories):
         cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
         for val in cat_df["총시간"]:
             t_mins += hhmm_to_minutes(val)
-            
     cols[i].metric(f"총 {cat} 시간", minutes_to_hhmm(t_mins))
 
 st.markdown("---")
 
-# 2. 근무 / 휴가 신청 작성 폼
 st.subheader("📝 근무 / 휴가 신청 작성")
 
 with st.form("entry_form"):
@@ -215,29 +178,25 @@ if submit:
         st.error("종료시간은 시작시간보다 나중이어야 하며, 점심시간(12:00~13:00) 외 실근무 시간이 포함되어야 합니다.")
     else:
         total_hhmm = minutes_to_hhmm(net_mins)
-        payload = {
-            "sheetName": SHEET_NAME,
-            "날짜": req_date.strftime("%Y-%m-%d"),
-            "시작시간": s_str,
-            "종료시간": e_str,
-            "총시간": total_hhmm,
-            "구분": category,
-            "목적지": destination,
-            "사유": reason
-        }
+        row_data = [
+            req_date.strftime("%Y-%m-%d"),
+            s_str,
+            e_str,
+            total_hhmm,
+            category,
+            destination,
+            reason
+        ]
         
         with st.spinner("구글 시트에 기록 중입니다..."):
-            if save_to_sheet(payload):
+            if save_to_sheet(SHEET_NAME, row_data):
                 st.cache_data.clear()
-                time.sleep(1)
+                time.sleep(0.5)
                 st.success(f"성공적으로 저장되었습니다! (인정 시간: {total_hhmm})")
                 st.rerun()
-            else:
-                st.error("저장에 실패했습니다.")
 
 st.markdown("---")
 
-# 3. 개인별 신청 전체 기록
 st.subheader(f"📋 {WORKER_NAME} 신청 전체 기록")
 if not df.empty:
     disp_df = df.drop(columns=['date_dt'], errors='ignore')
