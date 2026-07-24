@@ -8,13 +8,13 @@ from streamlit_calendar import calendar
 
 st.set_page_config(page_title="근태 관리 시스템", page_icon="🏢", layout="wide")
 
-# 근로자 설정 및 지정 색상
+# 근로자 설정 및 지정 색상 (24시간제 및 날짜 정확화)
 WORKERS = [
-    {"name": "박은경", "hire_date": date(2016, 3, 1), "page": "pages/1_박은경.py", "color": "#3182CE"}, # 파란색
-    {"name": "채미혜", "hire_date": date(2018, 3, 1), "page": "pages/2_채미혜.py", "color": "#38A169"}, # 초록색
-    {"name": "박인미", "hire_date": date(2023, 8, 1), "page": "pages/3_박인미.py", "color": "#00B5D8"}, # 하늘색
-    {"name": "조윤희", "hire_date": date(2023, 8, 1), "page": "pages/4_조윤희.py", "color": "#DD6B20"}, # 주황색
-    {"name": "성지영", "hire_date": date(2026, 7, 1), "page": "pages/5_성지영.py", "color": "#805AD5"}, # 보라색
+    {"name": "박은경", "hire_date": date(2016, 3, 1), "color": "#3182CE"}, # 파란색
+    {"name": "채미혜", "hire_date": date(2018, 3, 1), "color": "#38A169"}, # 초록색
+    {"name": "박인미", "hire_date": date(2023, 8, 1), "color": "#00B5D8"}, # 하늘색
+    {"name": "조윤희", "hire_date": date(2023, 8, 1), "color": "#DD6B20"}, # 주황색
+    {"name": "성지영", "hire_date": date(2026, 7, 1), "color": "#805AD5"}, # 보라색
 ]
 
 # ---------------------------------------------------------
@@ -47,29 +47,56 @@ def load_worker_data(sheet_name):
             if col not in df.columns:
                 df[col] = ""
         return df[target_cols]
-    except Exception as e:
+    except Exception:
         return pd.DataFrame(columns=target_cols)
 
+# ---------------------------------------------------------
+# 시간 및 날짜 처리 함수 (24시간제 적용)
+# ---------------------------------------------------------
 def extract_time_str(val):
+    """HH:MM:SS 또는 HH:MM 형태에서 24시간제 HH:MM만 추출"""
     s = str(val).strip().replace("'", "").replace('"', '')
     match = re.search(r'(\d{1,2}:\d{2})', s)
-    return match.group(1) if match else s
+    return match.group(1) if match else ""
 
-def hhmm_to_minutes(s):
+def calculate_net_minutes(start_str, end_str):
+    """
+    시작시간~종료시간 실근무/휴가 분(Minutes) 계산
+    12:00~13:00(점심시간)이 포함되어 있으면 60분 차감
+    """
+    s_hhmm = extract_time_str(start_str)
+    e_hhmm = extract_time_str(end_str)
+    
+    if not s_hhmm or not e_hhmm:
+        return 0
+        
     try:
-        val_str = extract_time_str(s)
-        if not val_str or ":" not in val_str:
+        s_dt = datetime.strptime(s_hhmm, "%H:%M")
+        e_dt = datetime.strptime(e_hhmm, "%H:%M")
+        
+        if e_dt <= s_dt:
             return 0
-        parts = val_str.split(":")
-        return int(parts[0]) * 60 + int(parts[1])
-    except:
+            
+        total_mins = int((e_dt - s_dt).total_seconds() // 60)
+        
+        # 12:00 ~ 13:00 점심시간 포함 여부 체크
+        lunch_start = datetime.strptime("12:00", "%H:%M")
+        lunch_end = datetime.strptime("13:00", "%H:%M")
+        
+        if s_dt <= lunch_start and e_dt >= lunch_end:
+            total_mins -= 60
+            
+        return max(0, total_mins)
+    except Exception:
         return 0
 
 def minutes_to_hhmm(mins):
+    """분을 24시간제 HH:MM 형식으로 변환"""
     mins = max(0, int(mins))
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
 def get_current_period(hire_d, ref_date=None):
+    """입사일 기준 현재 산정주기 계산"""
     if ref_date is None:
         ref_date = date.today()
     try:
@@ -119,16 +146,18 @@ for w in WORKERS:
     cat_mins = {cat: 0 for cat in categories}
     
     if not df.empty and "날짜" in df.columns:
-        df['date_dt'] = pd.to_datetime(df['날짜'], errors='coerce').dt.date
+        # 날짜 포맷 정규화 (2026. 3. 5 / 2026.3.5 / 2026-03-05 모두 대응)
+        clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
+        df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce').dt.date
         
-        # 1. 산정주기별 누적 시간 계산
+        # 1. 산정주기별 누적 시간 계산 (점심시간 차감 반영)
         period_df = df[(df['date_dt'] >= p_start) & (df['date_dt'] <= p_end)]
         for cat in categories:
             cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
-            total_m = sum(hhmm_to_minutes(val) for val in cat_df["총시간"])
+            total_m = sum(calculate_net_minutes(r["시작시간"], r["종료시간"]) for _, r in cat_df.iterrows())
             cat_mins[cat] = total_m
 
-        # 2. 달력 일정 이벤트 데이터 생성
+        # 2. 달력 일정 이벤트 데이터 생성 (24시간제 표시)
         for idx, row in df.iterrows():
             if pd.isna(row['date_dt']):
                 continue
@@ -138,7 +167,6 @@ for w in WORKERS:
             e_time = extract_time_str(row['종료시간'])
             cat = str(row['구분']).strip()
             
-            # 시간이 명확히 기재되어 있다면 ISO 포맷 생성, 없으면 종일 이벤트
             if ":" in s_time and ":" in e_time:
                 start_iso = f"{d_str}T{s_time:0>5}:00"
                 end_iso = f"{d_str}T{e_time:0>5}:00"
@@ -152,7 +180,7 @@ for w in WORKERS:
                 "title": title_str,
                 "start": start_iso,
                 "end": end_iso,
-                "color": w["color"], # 지정 색상 적용
+                "color": w["color"],
                 "textColor": "#FFFFFF"
             })
 
@@ -175,11 +203,10 @@ st.dataframe(summary_df, use_container_width=True, hide_index=True)
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 📅 월간 달력 일정표
+# 📅 월간 달력 일정표 (범례 괄호 제거 & 24시간제)
 # ---------------------------------------------------------
 st.subheader("📅 월간 근태 일정표")
 
-# 범례 (Legend) 표기
 st.markdown("""
 <div style="display: flex; gap: 15px; margin-bottom: 15px; font-weight: bold;">
     <span style="color: #3182CE;">■ 박은경</span>
@@ -190,7 +217,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# FullCalendar 옵션 설정
 calendar_options = {
     "editable": False,
     "selectable": True,
@@ -201,7 +227,11 @@ calendar_options = {
     },
     "initialView": "dayGridMonth",
     "locale": "ko",
+    "slotLabelFormat": {
+        "hour": "2-digit",
+        "minute": "2-digit",
+        "hour12": False # 24시간제 표기 설정
+    }
 }
 
-# 달력 출력
 calendar(events=calendar_events, options=calendar_options, key="attendance_calendar")
