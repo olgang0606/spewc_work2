@@ -6,11 +6,11 @@ import time
 import re
 
 # =========================================================
-# 
+# 👤 근로자 및 입사일 설정
 # =========================================================
-WORKER_NAME = "박은경"  # 파일별 변경
+WORKER_NAME = "박은경"
 SHEET_NAME = WORKER_NAME
-HIRE_DATE = date(2016, 3, 1)
+HIRE_DATE = date(2016, 3, 1)  # 👈 실제 입사일에 맞게 수정하세요
 
 st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", page_icon="👤", layout="wide")
 
@@ -53,7 +53,6 @@ def clean_str(val):
     return str(val).strip().replace("'", "").replace('"', '')
 
 def extract_time_str(val):
-    """Sat Dec 30 1899 09:00:00 GMT... 형태에서 09:00 형태만 안전하게 추출"""
     s = clean_str(val)
     match = re.search(r'(\d{1,2}:\d{2})', s)
     if match:
@@ -61,7 +60,6 @@ def extract_time_str(val):
     return s
 
 def extract_date_str(val):
-    """2026-07-24 형태의 날짜 추출"""
     s = clean_str(val)
     match = re.search(r'(\d{4}-\d{2}-\d{2})', s)
     if match:
@@ -82,7 +80,6 @@ def minutes_to_hhmm(mins):
     mins = max(0, int(mins))
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
-# 점심시간(12:00~13:00) 차감 계산
 def calculate_net_minutes(start_str, end_str):
     try:
         fmt = "%H:%M"
@@ -123,7 +120,6 @@ def load_data(sheet_name):
         
         df_res = pd.DataFrame(data[1:], columns=data[0])
         
-        # 필드별 데이터 정제
         for col in df_res.columns:
             df_res[col] = df_res[col].apply(clean_str)
             
@@ -133,7 +129,6 @@ def load_data(sheet_name):
                 
         df_res = df_res[target_cols].copy()
         
-        # 이상 포맷 텍스트 정상화
         df_res["날짜"] = df_res["날짜"].apply(extract_date_str)
         df_res["시작시간"] = df_res["시작시간"].apply(extract_time_str)
         df_res["종료시간"] = df_res["종료시간"].apply(extract_time_str)
@@ -156,6 +151,11 @@ def save_to_sheet(payload):
 # UI 화면 구성
 # ---------------------------------------------------------
 st.title(f"👤 {WORKER_NAME} 근태 관리")
+
+# 🔄 구글 시트 즉시 동기화 버튼
+if st.button("🔄 구글 시트 데이터 즉시 동기화"):
+    st.cache_data.clear()
+    st.rerun()
 
 period_start, period_end = get_current_period(HIRE_DATE)
 st.caption(f"📅 **입사일:** {HIRE_DATE.strftime('%Y-%m-%d')} | **현재 산정 주기 (1년):** {period_start.strftime('%Y-%m-%d')} ~ {period_end.strftime('%Y-%m-%d')}")
@@ -184,7 +184,7 @@ for i, cat in enumerate(categories):
 
 st.markdown("---")
 
-# 2. 신청 폼
+# 2. 근무 / 휴가 신청 작성 폼
 st.subheader("📝 근무 / 휴가 신청 작성")
 
 with st.form("entry_form"):
@@ -237,7 +237,7 @@ if submit:
 
 st.markdown("---")
 
-# 3. 전체 기록
+# 3. 개인별 신청 전체 기록
 st.subheader(f"📋 {WORKER_NAME} 신청 전체 기록")
 if not df.empty:
     disp_df = df.drop(columns=['date_dt'], errors='ignore')
