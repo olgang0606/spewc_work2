@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date
-import calendar
+from datetime import datetime, date, time
 from streamlit_calendar import calendar as st_calendar
 
 # -----------------------------------------------------------------------------
@@ -20,31 +19,25 @@ EMPLOYEES = {
 CATEGORIES = ["연차", "대체휴무", "병가", "공가"]
 
 # -----------------------------------------------------------------------------
-# 2. 로직 함수 (연차 계산 및 시간 변환)
+# 2. 로직 함수 (연차 계산, 시간 연산, 점심시간 차감)
 # -----------------------------------------------------------------------------
-def calculate_annual_leave_days(hire_date: date, target_year: int) -> float:
+def calculate_annual_leave_hours(hire_date: date, target_year: int) -> int:
     """
-    근로기준법 기준 연차 일수 계산 (입사일 기준 해당 연도 발생 연차)
-    - 1년 미만: 1개월 개근 시 1일 (최대 11일)
-    - 1년 이상: 기본 15일 + 2년마다 1일 가산 (최대 25일)
+    근로기준법 기준 연차 시간 계산 (1일 = 8시간)
+    - 1년 미만: 1개월 개근 시 1일 (최대 11일 = 88시간)
+    - 1년 이상: 기본 15일 + 2년마다 1일 가산 (최대 25일 = 200시간)
     """
-    # 해당 연도의 입사기념일
-    anniversary = date(target_year, hire_date.month, hire_date.day)
-    
-    # 근속 연수 산정 (입사일 기준 몇 번째 연도인지)
     years_of_service = target_year - hire_date.year
     
     if years_of_service < 1:
-        # 1년 미만 근로자: 입사 후 경과한 월수에 따라 최대 11일 (기본 로직)
         today = date.today()
         months = (today.year - hire_date.year) * 12 + today.month - hire_date.month
-        return min(max(months, 0), 11)
+        days = min(max(months, 0), 11)
     else:
-        # 1년 이상 근로자
-        # 가산연차 = (근속연수 - 1) // 2
         additional_days = (years_of_service - 1) // 2
-        total_days = 15 + additional_days
-        return min(total_days, 25)
+        days = min(15 + additional_days, 25)
+        
+    return days * 8  # 총 시간(Hours) 반환
 
 def minutes_to_hhmm(minutes: int) -> str:
     """분 단위를 hh:mm 문자열 형식으로 변환"""
@@ -52,26 +45,44 @@ def minutes_to_hhmm(minutes: int) -> str:
     mins = minutes % 60
     return f"{hours:02d}:{mins:02d}"
 
-def time_str_to_minutes(time_str: str) -> int:
-    """hh:mm 문자열을 분 단위로 변환"""
-    try:
-        hours, mins = map(int, time_str.split(":"))
-        return hours * 60 + mins
-    except:
+def calculate_work_minutes(start_t: time, end_t: time) -> int:
+    """
+    시작시간과 종료시간 사이의 총 분(minute)을 계산하며,
+    12:00~13:00(점심시간)과 겹치는 시간이 있으면 제외함.
+    """
+    start_dt = datetime.combine(date.today(), start_t)
+    end_dt = datetime.combine(date.today(), end_t)
+    
+    if end_dt <= start_dt:
         return 0
+        
+    total_minutes = int((end_dt - start_dt).total_seconds() // 60)
+    
+    # 점심시간 범위 (12:00 ~ 13:00)
+    lunch_start = datetime.combine(date.today(), time(12, 0))
+    lunch_end = datetime.combine(date.today(), time(13, 0))
+    
+    # 점심시간과 입력된 시간 사이의 겹치는 구간 계산
+    overlap_start = max(start_dt, lunch_start)
+    overlap_end = min(end_dt, lunch_end)
+    
+    if overlap_start < overlap_end:
+        lunch_overlap_mins = int((overlap_end - overlap_start).total_seconds() // 60)
+        total_minutes -= lunch_overlap_mins
+        
+    return max(total_minutes, 0)
 
 # -----------------------------------------------------------------------------
-# 3. 세션 상태(Session State) 초기화 (데이터베이스 역할)
+# 3. 세션 상태(Session State) 초기화
 # -----------------------------------------------------------------------------
 if "records" not in st.session_state:
-    # 예시 초기 데이터 생성
     st.session_state.records = pd.DataFrame([
         {
             "근로자": "박은경",
             "날짜": date(2026, 7, 10),
             "시작시간": "09:00",
             "종료시간": "18:00",
-            "총시간": "08:00",
+            "총시간": "08:00",  # 점심시간 1시간 제외됨
             "총시간_분": 480,
             "구분": "연차",
             "목적지": "-",
@@ -91,15 +102,17 @@ if "records" not in st.session_state:
     ])
 
 # -----------------------------------------------------------------------------
-# 4. 사이드바 페이지 이동
+# 4. 사이드바 메뉴 (근로자 5명 나열)
 # -----------------------------------------------------------------------------
 st.sidebar.title("📌 송파교육복지센터")
-menu = st.sidebar.radio("메뉴 이동", ["메인 (월간 달력)", "근로자별 관리"])
+
+menu_options = ["메인 (월간 달력)"] + list(EMPLOYEES.keys())
+selected_menu = st.sidebar.radio("메뉴 이동", menu_options)
 
 # -----------------------------------------------------------------------------
-# PAGE 1: 메인 페이지 (월간 달력 & 전체 현황)
+# PAGE 1: 메인 페이지 (월간 달력)
 # -----------------------------------------------------------------------------
-if menu == "메인 (월간 달력)":
+if selected_menu == "메인 (월간 달력)":
     st.header("🗓️ 근로자별 월간 근무 현황 달력")
     
     # 1. 근로자별 구분 합계 요약 표
@@ -121,11 +134,10 @@ if menu == "메인 (월간 달력)":
     
     st.markdown("---")
     
-    # 2. 풀캘린더 일정표
+    # 2. 월간 일정표
     st.subheader("📅 월간 일정표")
     
     calendar_events = []
-    # 색상 매핑
     color_map = {
         "연차": "#FF4B4B",
         "대체휴무": "#31333F",
@@ -154,31 +166,35 @@ if menu == "메인 (월간 달력)":
     st_calendar(events=calendar_events, options=calendar_options)
 
 # -----------------------------------------------------------------------------
-# PAGE 2: 근로자별 개별 페이지
+# PAGE 2~6: 근로자별 개별 페이지 (메뉴 클릭 시 이동)
 # -----------------------------------------------------------------------------
-elif menu == "근로자별 관리":
-    selected_emp = st.sidebar.selectbox("근로자 선택", list(EMPLOYEES.keys()))
+else:
+    selected_emp = selected_menu
     hire_date = EMPLOYEES[selected_emp]
     current_year = date.today().year
     
     st.header(f"👤 {selected_emp} 근로자 현황")
     
-    # 근로자 기본 정보 및 연차 계산
-    annual_days = calculate_annual_leave_days(hire_date, current_year)
-    annual_hours = annual_days * 8  # 1일 8시간 기준
+    # 근로자 기본 정보 및 연차 계산 (시간 단위)
+    annual_hours = calculate_annual_leave_hours(hire_date, current_year)
+    annual_hhmm = minutes_to_hhmm(annual_hours * 60)
     
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("입사일", hire_date.strftime("%Y-%m-%d"))
     with col2:
-        st.metric(f"{current_year}년 산정 연차 일수", f"{annual_days} 일")
+        st.metric(f"{current_year}년 산정 연차 시간", f"{annual_hours}시간 ({annual_hhmm})")
     with col3:
-        st.metric(f"{current_year}년 총 연차 시간", f"{int(annual_hours)} 시간 ({minutes_to_hhmm(int(annual_hours*60))})")
+        # 사용한 총 연차 시간 계산
+        emp_records = st.session_state.records[st.session_state.records["근로자"] == selected_emp]
+        used_annual_mins = emp_records[emp_records["구분"] == "연차"]["총시간_분"].sum()
+        st.metric("사용 연차 시간", minutes_to_hhmm(used_annual_mins))
         
     st.markdown("---")
     
     # 근무 기록 입력 폼
     with st.expander("➕ 근무/휴무 기록 추가하기", expanded=False):
+        st.caption("ℹ️ 12:00~13:00(점심시간)이 포함된 경우 1시간이 자동으로 차감됩니다.")
         with st.form("add_record_form"):
             c1, c2, c3 = st.columns(3)
             rec_date = c1.date_input("날짜", date.today())
@@ -193,13 +209,10 @@ elif menu == "근로자별 관리":
             submit = st.form_submit_button("저장")
             
             if submit:
-                # 시간 및 분 계산
-                start_dt = datetime.combine(rec_date, start_t)
-                end_dt = datetime.combine(rec_date, end_t)
-                diff_mins = int((end_dt - start_dt).total_seconds() // 60)
+                diff_mins = calculate_work_minutes(start_t, end_t)
                 
                 if diff_mins <= 0:
-                    st.error("종료시간은 시작시간보다 나중이어야 합니다.")
+                    st.error("종료시간은 시작시간보다 나중이어야 하며, 점심시간 외 유효한 근로시간이 있어야 합니다.")
                 else:
                     new_row = {
                         "근로자": selected_emp,
@@ -216,7 +229,7 @@ elif menu == "근로자별 관리":
                         [st.session_state.records, pd.DataFrame([new_row])], 
                         ignore_index=True
                     )
-                    st.success("성공적으로 등록되었습니다.")
+                    st.success(f"성공적으로 등록되었습니다. (차감 적용 후 총시간: {minutes_to_hhmm(diff_mins)})")
                     st.rerun()
 
     # 개인별 상세 총괄표
