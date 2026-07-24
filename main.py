@@ -1,45 +1,65 @@
 import streamlit as st
 import pandas as pd
-import requests
+import gspread
+from google.oauth2.service_account import Credentials
+from datetime import date, datetime
 import re
-from datetime import datetime
-from streamlit_calendar import calendar
 
-st.set_page_config(
-    page_title="통합 근태 관리 시스템",
-    page_icon="📅",
-    layout="wide"
-)
+st.set_page_config(page_title="근태 관리 시스템", page_icon="🏢", layout="wide")
 
-WORKERS = ["박은경", "채미혜", "박인미", "조윤희", "성지영"]
-CATEGORIES = ["연차", "대체휴무", "병가", "공가"]
-
-# 🎨 요청하신 근로자별 색상 계열 설정
-COLOR_MAP = {
-    "박은경": "#3563E9", # 파랑 계열
-    "채미혜": "#2E7D32", # 초록 계열
-    "박인미": "#38BDF8", # 하늘색 계열
-    "조윤희": "#FF7A00", # 주황색 계열
-    "성지영": "#8B5CF6"  # 보라색 계열
-}
+WORKERS = [
+    {"name": "박은경", "hire_date": date(2017, 3, 1), "page": "pages/1_박은경.py"},
+    {"name": "채미혜", "hire_date": date(2018, 3, 1), "page": "pages/2_채미혜.py"},
+    {"name": "박인미", "hire_date": date(2019, 3, 1), "page": "pages/3_박인미.py"},
+    {"name": "조윤희", "hire_date": date(2020, 3, 1), "page": "pages/4_조윤희.py"},
+    {"name": "성지영", "hire_date": date(2021, 3, 1), "page": "pages/5_성지영.py"},
+]
 
 # ---------------------------------------------------------
-# 시간 계산 및 정제 헬퍼 함수
+# Google Sheets API 연동
 # ---------------------------------------------------------
-def clean_str(val):
-    if pd.isna(val) or val is None:
-        return ""
-    return str(val).strip().replace("'", "").replace('"', '')
+@st.cache_resource
+def get_gspread_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    credentials = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=scopes
+    )
+    return gspread.authorize(credentials)
+
+@st.cache_data(ttl=5)
+def load_worker_data(sheet_name):
+    target_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
+    try:
+        gc = get_gspread_client()
+        sh = gc.open_by_url(st.secrets["SPREADSHEET_URL"])
+        worksheet = sh.worksheet(sheet_name)
+        records = worksheet.get_all_records()
+        if not records:
+            return pd.DataFrame(columns=target_cols)
+        df = pd.DataFrame(records)
+        for col in target_cols:
+            if col not in df.columns:
+                df[col] = ""
+        return df[target_cols]
+    except Exception as e:
+        return pd.DataFrame(columns=target_cols)
+
+def extract_time_str(val):
+    s = str(val).strip().replace("'", "").replace('"', '')
+    match = re.search(r'(\d{1,2}:\d{2})', s)
+    return match.group(1) if match else s
 
 def hhmm_to_minutes(s):
     try:
-        val_str = clean_str(s)
+        val_str = extract_time_str(s)
         if not val_str or ":" not in val_str:
             return 0
-        match = re.search(r'(\d{1,2}):(\d{1,2})', val_str)
-        if match:
-            return int(match.group(1)) * 60 + int(match.group(2))
-        return 0
+        parts = val_str.split(":")
+        return int(parts[0]) * 60 + int(parts[1])
     except:
         return 0
 
@@ -47,113 +67,82 @@ def minutes_to_hhmm(mins):
     mins = max(0, int(mins))
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
-# ---------------------------------------------------------
-# 구글 시트 전체 데이터 로드
-# ---------------------------------------------------------
-@st.cache_data(ttl=1)
-def load_all_worker_data():
+def get_current_period(hire_d, ref_date=None):
+    if ref_date is None:
+        ref_date = date.today()
     try:
-        sheet_url = st.secrets["SHEET_URL"]
-        res = requests.get(sheet_url, params={"action": "getAll"})
-        data = res.json()
-        return data if isinstance(data, list) else []
-    except Exception as e:
-        st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
-        return []
+        this_year_hire = date(ref_date.year, hire_d.month, hire_d.day)
+    except ValueError:
+        this_year_hire = date(ref_date.year, hire_d.month, 28)
+        
+    if ref_date >= this_year_hire:
+        start_date = this_year_hire
+        try:
+            end_date = date(ref_date.year + 1, hire_d.month, hire_d.day) - pd.Timedelta(days=1)
+        except ValueError:
+            end_date = date(ref_date.year + 1, hire_d.month, 28) - pd.Timedelta(days=1)
+    else:
+        try:
+            start_date = date(ref_date.year - 1, hire_d.month, hire_d.day)
+        except ValueError:
+            start_date = date(ref_date.year - 1, hire_d.month, 28)
+        end_date = this_year_hire - pd.Timedelta(days=1)
+        
+    if isinstance(end_date, pd.Timestamp):
+        end_date = end_date.date()
+    return start_date, end_date
 
 # ---------------------------------------------------------
-# UI 구성
+# UI 화면
 # ---------------------------------------------------------
-st.title("🏢 통합 근태 및 휴가 관리 시스템")
+st.title("🏢 근태 관리 종합 대시보드")
+st.markdown("전체 근로자의 근태 현황을 한눈에 확인하고 각 근로자 페이지로 이동할 수 있습니다.")
+
+col_btn, _ = st.columns([2, 8])
+with col_btn:
+    if st.button("🔄 전체 데이터 새로고침"):
+        st.cache_data.clear()
+        st.rerun()
+
 st.markdown("---")
-
-raw_data = load_all_worker_data()
-
-# 1. 근로자 5명 구분별 사용시간 합계 요약표
-st.subheader("📊 근로자별 근무/휴가 유형 합계 요약")
 
 summary_list = []
-for worker in WORKERS:
-    worker_rows = [r for r in raw_data if r.get("근로자명") == worker]
+categories = ["연차", "대체휴무", "병가", "공가"]
+
+for w in WORKERS:
+    df = load_worker_data(w["name"])
+    p_start, p_end = get_current_period(w["hire_date"])
     
-    worker_summary = {"근로자명": worker}
-    for cat in CATEGORIES:
-        total_mins = sum(
-            hhmm_to_minutes(r.get("총시간", "")) 
-            for r in worker_rows 
-            if clean_str(r.get("구분", "")) == cat
-        )
-        worker_summary[f"총 {cat} 시간"] = minutes_to_hhmm(total_mins)
+    cat_mins = {cat: 0 for cat in categories}
+    
+    if not df.empty and "날짜" in df.columns:
+        df['date_dt'] = pd.to_datetime(df['날짜'], errors='coerce').dt.date
+        period_df = df[(df['date_dt'] >= p_start) & (df['date_dt'] <= p_end)]
         
-    summary_list.append(worker_summary)
+        for cat in categories:
+            cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
+            total_m = sum(hhmm_to_minutes(val) for val in cat_df["총시간"])
+            cat_mins[cat] = total_m
 
-df_summary = pd.DataFrame(summary_list)
-st.dataframe(df_summary, use_container_width=True, hide_index=True)
+    row = {
+        "근로자명": w["name"],
+        "입사일": w["hire_date"].strftime("%Y-%m-%d"),
+        "현재 산정주기": f"{p_start.strftime('%Y-%m-%d')} ~ {p_end.strftime('%Y-%m-%d')}",
+        "연차 시간": minutes_to_hhmm(cat_mins["연차"]),
+        "대체휴무 시간": minutes_to_hhmm(cat_mins["대체휴무"]),
+        "병가 시간": minutes_to_hhmm(cat_mins["병가"]),
+        "공가 시간": minutes_to_hhmm(cat_mins["공가"]),
+    }
+    summary_list.append(row)
 
-st.markdown("---")
-
-# 2. 월간 일정표 (Calendar)
-st.subheader("📅 전체 근로자 월간 근태 달력")
-
-events = []
-for item in raw_data:
-    worker = item.get("근로자명", "")
-    date_str = item.get("날짜", "")
-    category = item.get("구분", "근무")
-    start_t = item.get("시작시간", "")
-    end_t = item.get("종료시간", "")
-    destination = item.get("목적지", "")
-    reason = item.get("사유", "")
-
-    if date_str:
-        title = f"[{worker}] {category}"
-        if start_t and end_t:
-            title += f" ({start_t}~{end_t})"
-        if destination:
-            title += f" @{destination}"
-
-        events.append({
-            "title": title,
-            "start": date_str,
-            "end": date_str,
-            "backgroundColor": COLOR_MAP.get(worker, "#3174AD"),
-            "borderColor": COLOR_MAP.get(worker, "#3174AD"),
-            "allDay": True,
-            "extendedProps": {
-                "근로자명": worker,
-                "구분": category,
-                "사유": reason
-            }
-        })
-
-calendar_options = {
-    "headerToolbar": {
-        "left": "prev,next today",
-        "center": "title",
-        "right": "dayGridMonth,timeGridWeek"
-    },
-    "initialView": "dayGridMonth",
-    "locale": "ko",
-    "selectable": True,
-    "navLinks": True,
-}
-
-if events:
-    calendar(events=events, options=calendar_options, key="main_attendance_calendar")
-else:
-    st.info("등록된 일정 데이터가 없거나 시트 연결을 확인해야 합니다.")
+summary_df = pd.DataFrame(summary_list)
+st.subheader("📊 근로자별 산정주기 누적 사용 현황")
+st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
 st.markdown("---")
-
-# 범례 HTML/CSS 구성 (색상 박스 형태)
-legend_html = """
-<div style="display: flex; gap: 15px; flex-wrap: wrap; align-items: center; font-size: 15px;">
-    <strong>💡 근로자별 범례:</strong>
-    <span style="display: inline-flex; align-items: center;"><span style="width: 12px; height: 12px; background-color: #3563E9; display: inline-block; border-radius: 50%; margin-right: 5px;"></span>박은경 (파랑)</span>
-    <span style="display: inline-flex; align-items: center;"><span style="width: 12px; height: 12px; background-color: #2E7D32; display: inline-block; border-radius: 50%; margin-right: 5px;"></span>채미혜 (초록)</span>
-    <span style="display: inline-flex; align-items: center;"><span style="width: 12px; height: 12px; background-color: #38BDF8; display: inline-block; border-radius: 50%; margin-right: 5px;"></span>박인미 (하늘)</span>
-    <span style="display: inline-flex; align-items: center;"><span style="width: 12px; height: 12px; background-color: #FF7A00; display: inline-block; border-radius: 50%; margin-right: 5px;"></span>조윤희 (주황)</span>
-    <span style="display: inline-flex; align-items: center;"><span style="width: 12px; height: 12px; background-color: #8B5CF6; display: inline-block; border-radius: 50%; margin-right: 5px;"></span>성지영 (보라)</span>
-</div>
-"""
-st.markdown(legend_html, unsafe_allow_html=True)
+st.subheader("👉 근로자 선택 (바로가기)")
+cols = st.columns(5)
+for idx, w in enumerate(WORKERS):
+    with cols[idx]:
+        st.markdown(f"### {w['name']}")
+        st.page_link(w["page"], label=f"{w['name']} 근태 관리", icon="👤")
