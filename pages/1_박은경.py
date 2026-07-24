@@ -15,25 +15,42 @@ SHEET_NAME = "박은경"
 HIRE_DATE = date(2016, 3, 1)
 
 # ---------------------------------------------------------
-# 시간 및 연차 계산 함수
+# 시간 정제 및 연산 함수 (완전 보완)
 # ---------------------------------------------------------
 def clean_time_str(val):
-    """ISO 날짜 형식이나 따옴표가 섞여 들어왔을 때 HH:MM 추출"""
+    """'7:30', '07:30', '18:00' 등 다양한 포맷에서 HH:MM 추출"""
     if pd.isna(val) or not val:
         return ""
     val_str = str(val).strip().lstrip("'")
     
-    # HH:MM 예외 처리 (ISO 포맷 정규식 추출)
-    match = re.search(r'(\d{2}:\d{2})', val_str)
+    # 시간 정규식 (1자리 또는 2자리 시:분)
+    match = re.search(r'(\d{1,2}):(\d{2})', val_str)
     if match:
-        return match.group(1)
+        h, m = match.group(1), match.group(2)
+        return f"{int(h):02d}:{int(m):02d}"
     return val_str
+
+def hhmm_to_minutes(s):
+    """시간 문자열을 총 분(Minutes)으로 정확히 변환"""
+    try:
+        clean_s = clean_time_str(s)
+        if not clean_s or ":" not in clean_s:
+            return 0
+        parts = clean_s.split(":")
+        return int(parts[0]) * 60 + int(parts[1])
+    except:
+        return 0
+
+def minutes_to_hhmm(mins):
+    h = mins // 60
+    m = mins % 60
+    return f"{h:02d}:{m:02d}"
 
 def calculate_net_minutes(start_str, end_str):
     try:
         fmt = "%H:%M"
-        t_start = datetime.strptime(start_str, fmt)
-        t_end = datetime.strptime(end_str, fmt)
+        t_start = datetime.strptime(clean_time_str(start_str), fmt)
+        t_end = datetime.strptime(clean_time_str(end_str), fmt)
         
         if t_end <= t_start:
             return 0
@@ -52,21 +69,6 @@ def calculate_net_minutes(start_str, end_str):
             total_mins -= overlap_mins
             
         return max(0, total_mins)
-    except:
-        return 0
-
-def minutes_to_hhmm(mins):
-    h = mins // 60
-    m = mins % 60
-    return f"{h:02d}:{m:02d}"
-
-def hhmm_to_minutes(s):
-    try:
-        clean_s = clean_time_str(s)
-        if not clean_s:
-            return 0
-        parts = clean_s.split(":")
-        return int(parts[0]) * 60 + int(parts[1])
     except:
         return 0
 
@@ -103,7 +105,11 @@ def load_data(sheet_name):
         
         df_res = pd.DataFrame(data[1:], columns=data[0])
         
-        # 시간 관련 컬럼 정제 처리
+        # 유효하지 않은 공백 행 완전히 제거
+        if "근로자명" in df_res.columns:
+            df_res = df_res[df_res["근로자명"].str.strip() != ""].copy()
+            
+        # 시간 문자열 정제
         for col in ["시작시간", "종료시간", "총시간"]:
             if col in df_res.columns:
                 df_res[col] = df_res[col].apply(clean_time_str)
@@ -136,11 +142,12 @@ df = load_data(SHEET_NAME)
 
 categories = ["연차", "대체휴무", "병가", "공가"]
 
-# 요약 지표 출력 및 계산
+# 요약 지표 출력 및 계산 (정확히 정제된 총시간 연산)
 cols = st.columns(4)
 for i, cat in enumerate(categories):
     if not df.empty and "구분" in df.columns and "총시간" in df.columns:
-        cat_records = df[df["구분"] == cat]
+        # 구분명 뒤공백 제거 비교
+        cat_records = df[df["구분"].astype(str).str.strip() == cat]
         t_mins = sum(hhmm_to_minutes(v) for v in cat_records["총시간"])
     else:
         t_mins = 0
@@ -148,7 +155,7 @@ for i, cat in enumerate(categories):
 
 st.markdown("---")
 
-# 입력 폼 (30분 단위)
+# 입력 폼
 st.subheader("📝 근무 / 휴가 신청 작성")
 with st.form("entry_form"):
     c1, c2, c3 = st.columns(3)
