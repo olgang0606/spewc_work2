@@ -5,15 +5,17 @@ from datetime import datetime, date
 import time
 import re
 
-# ---------------------------------------------------------
-# 근로자별 설정 (각 파일별로 WORKER_NAME 수정)
-# ---------------------------------------------------------
+# =========================================================
+# 
+# =========================================================
 WORKER_NAME = "박은경"
 SHEET_NAME = WORKER_NAME
-HIRE_DATE = date(2016, 3, 1)
 
-st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", layout="wide")
+st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", page_icon="👤", layout="wide")
 
+# ---------------------------------------------------------
+# 데이터 데이터 정제 및 시간 계산 헬퍼 함수
+# ---------------------------------------------------------
 def clean_str(val):
     if pd.isna(val) or val is None:
         return ""
@@ -46,7 +48,7 @@ def calculate_net_minutes(start_str, end_str):
         
         total_mins = int((t_end - t_start).total_seconds() // 60)
         
-        # 12:00~13:00 점심시간 차감
+        # 12:00~13:00 점심시간 포함 시 차감
         lunch_start = datetime.strptime("12:00", fmt)
         lunch_end = datetime.strptime("13:00", fmt)
         
@@ -61,6 +63,9 @@ def calculate_net_minutes(start_str, end_str):
     except:
         return 0
 
+# ---------------------------------------------------------
+# 구글 시트 연동 함수 (조회 & 저장)
+# ---------------------------------------------------------
 @st.cache_data(ttl=1)
 def load_data(sheet_name):
     target_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
@@ -94,15 +99,16 @@ def save_to_sheet(payload):
     except:
         return False
 
-# UI
+# ---------------------------------------------------------
+# UI 화면 구성
+# ---------------------------------------------------------
 st.title(f"👤 {WORKER_NAME} 근태 관리")
 st.markdown("---")
 
 df = load_data(SHEET_NAME)
-
 categories = ["연차", "대체휴무", "병가", "공가"]
 
-# 상단 지표 계산 (A~G열 7개 구조 기반)
+# 1. 상단 근무 유형별 누적 사용시간 지표
 cols = st.columns(4)
 for i, cat in enumerate(categories):
     t_mins = 0
@@ -115,6 +121,7 @@ for i, cat in enumerate(categories):
 
 st.markdown("---")
 
+# 2. 근무 / 휴가 신청 폼 (날짜, 시작/종료시간, 구분, 목적지, 사유)
 st.subheader("📝 근무 / 휴가 신청 작성")
 with st.form("entry_form"):
     c1, c2, c3 = st.columns(3)
@@ -130,13 +137,14 @@ with st.form("entry_form"):
         
     submit = st.form_submit_button("시트에 저장하기")
 
+# 저장 처리 로직
 if submit:
     s_str = start_t.strftime("%H:%M")
     e_str = end_t.strftime("%H:%M")
     net_mins = calculate_net_minutes(s_str, e_str)
     
     if net_mins <= 0:
-        st.error("종료시간은 시작시간보다 나중이어야 하며, 점심시간(12:00~13:00) 외 근무시간이 포함되어야 합니다.")
+        st.error("종료시간은 시작시간보다 나중이어야 하며, 점심시간(12:00~13:00) 외 실근무 시간이 포함되어야 합니다.")
     else:
         total_hhmm = minutes_to_hhmm(net_mins)
         payload = {
@@ -157,12 +165,13 @@ if submit:
                 st.success(f"성공적으로 저장되었습니다! (인정 시간: {total_hhmm})")
                 st.rerun()
             else:
-                st.error("저장에 실패했습니다.")
+                st.error("저장에 실패했습니다. 앱스 스크립트 연결을 확인해 주세요.")
 
 st.markdown("---")
 
+# 3. 개인별 신청 전체 기록 테이블
 st.subheader(f"📋 {WORKER_NAME} 신청 전체 기록")
 if not df.empty:
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, use_container_width=True, hide_index=True)
 else:
-    st.info("등록된 기록이 없습니다.")
+    st.info("등록된 신청 기록이 없습니다.")
