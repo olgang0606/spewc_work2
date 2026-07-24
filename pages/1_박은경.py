@@ -15,22 +15,18 @@ SHEET_NAME = "박은경"
 HIRE_DATE = date(2016, 3, 1)
 
 # ---------------------------------------------------------
-# 시간 정제 및 연산 함수 (정밀 보완)
+# 시간 정제 및 연산 함수
 # ---------------------------------------------------------
 def clean_str(val):
-    """문자열 공백 및 따옴표 완전 정제"""
     if pd.isna(val) or val is None:
         return ""
     return str(val).strip().replace("'", "").replace('"', '')
 
 def hhmm_to_minutes(s):
-    """'8:00', '08:00', '7:30' 등의 시간 표현을 분(Minutes) 단위 정수로 변환"""
     try:
         val_str = clean_str(s)
         if not val_str or ":" not in val_str:
             return 0
-        
-        # 정규식으로 시, 분 추출
         match = re.search(r'(\d{1,2}):(\d{1,2})', val_str)
         if match:
             h = int(match.group(1))
@@ -41,7 +37,6 @@ def hhmm_to_minutes(s):
         return 0
 
 def minutes_to_hhmm(mins):
-    """분(Minutes) 정수를 HH:MM 문자열로 변환"""
     mins = max(0, int(mins))
     h = mins // 60
     m = mins % 60
@@ -100,27 +95,35 @@ def get_annual_leave_hours(hire_d, target_d=None):
 # ---------------------------------------------------------
 @st.cache_data(ttl=1)
 def load_data(sheet_name):
+    target_columns = ["근로자명", "날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
     try:
         sheet_url = st.secrets["SHEET_URL"]
         res = requests.get(sheet_url, params={"sheetName": sheet_name})
         data = res.json()
         if not data or len(data) < 2:
-            return pd.DataFrame(columns=["근로자명", "날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"])
+            return pd.DataFrame(columns=target_columns)
         
-        headers = [clean_str(h) for h in data[0]]
-        df_res = pd.DataFrame(data[1:], columns=headers)
+        # 헤더와 데이터 분리
+        df_res = pd.DataFrame(data[1:], columns=data[0])
         
-        # 컬럼 및 데이터 전체 공백 정제
+        # 데이터 내 문자열 공백 정제
         for col in df_res.columns:
             df_res[col] = df_res[col].apply(clean_str)
             
-        # 유효 데이터 필터링 (근로자명이나 날짜가 존재하는 행)
-        if "근로자명" in df_res.columns and "날짜" in df_res.columns:
-            df_res = df_res[(df_res["근로자명"] != "") | (df_res["날짜"] != "")].copy()
+        # 컬럼 존재 여부 체크 및 보장
+        for col in target_columns:
+            if col not in df_res.columns:
+                df_res[col] = ""
+                
+        # 컬럼 순서 고정
+        df_res = df_res[target_columns]
+        
+        # 유효 행 필터링
+        df_res = df_res[(df_res["근로자명"] != "") | (df_res["날짜"] != "")].copy()
             
         return df_res
     except:
-        return pd.DataFrame(columns=["근로자명", "날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"])
+        return pd.DataFrame(columns=target_columns)
 
 def save_to_sheet(payload):
     try:
@@ -146,13 +149,12 @@ df = load_data(SHEET_NAME)
 
 categories = ["연차", "대체휴무", "병가", "공가"]
 
-# 요약 지표 출력 (강화된 연산 로직)
+# 요약 지표 출력 및 합계 누적
 cols = st.columns(4)
 for i, cat in enumerate(categories):
     t_mins = 0
     if not df.empty and "구분" in df.columns and "총시간" in df.columns:
-        # 구분명 공백 제거 비교
-        cat_records = df[df["구분"].str.strip() == cat]
+        cat_records = df[df["구분"].astype(str).str.strip() == cat]
         for val in cat_records["총시간"]:
             t_mins += hhmm_to_minutes(val)
             
