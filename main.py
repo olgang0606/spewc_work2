@@ -260,6 +260,7 @@ for w in WORKERS:
         "시간외수당 적용시간": minutes_to_hhmm(total_ot_pay_mins),
         "통상임금 적용시간": minutes_to_hhmm(total_ordinary_mins),
         "시간외 총 지급수당": f"{total_ot_allowance:,}원"
+    })
 if not ot_df.empty:
     for _, row in ot_df.iterrows():
         if pd.isna(row['date_dt']):
