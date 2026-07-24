@@ -1,20 +1,40 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 import time
-
-st.set_page_config(page_title="근무 관리", layout="wide")
+import re
 
 # ---------------------------------------------------------
-# 
+# 근로자별 설정 (각 파일별로 WORKER_NAME 수정)
 # ---------------------------------------------------------
 WORKER_NAME = "채미혜"
+SHEET_NAME = WORKER_NAME
 HIRE_DATE = date(2018, 3, 1)
 
-# ---------------------------------------------------------
-# 시간 및 연차 계산 함수
-# ---------------------------------------------------------
+st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", layout="wide")
+
+def clean_str(val):
+    if pd.isna(val) or val is None:
+        return ""
+    return str(val).strip().replace("'", "").replace('"', '')
+
+def hhmm_to_minutes(s):
+    try:
+        val_str = clean_str(s)
+        if not val_str or ":" not in val_str:
+            return 0
+        match = re.search(r'(\d{1,2}):(\d{1,2})', val_str)
+        if match:
+            return int(match.group(1)) * 60 + int(match.group(2))
+        return 0
+    except:
+        return 0
+
+def minutes_to_hhmm(mins):
+    mins = max(0, int(mins))
+    return f"{mins // 60:02d}:{mins % 60:02d}"
+
 def calculate_net_minutes(start_str, end_str):
     try:
         fmt = "%H:%M"
@@ -41,51 +61,30 @@ def calculate_net_minutes(start_str, end_str):
     except:
         return 0
 
-def minutes_to_hhmm(mins):
-    h = mins // 60
-    m = mins % 60
-    return f"{h:02d}:{m:02d}"
-
-def hhmm_to_minutes(s):
-    try:
-        parts = str(s).split(":")
-        return int(parts[0]) * 60 + int(parts[1])
-    except:
-        return 0
-
-def get_annual_leave_hours(hire_d, target_d=None):
-    if target_d is None:
-        target_d = date.today()
-        
-    years = target_d.year - hire_d.year
-    if (target_d.month, target_d.day) < (hire_d.month, hire_d.day):
-        years -= 1
-        
-    if years < 0:
-        return 0
-    elif years == 0:
-        months = (target_d.year - hire_d.year) * 12 + target_d.month - hire_d.month
-        if target_d.day < hire_d.day:
-            months -= 1
-        return min(max(0, months), 11) * 8
-    else:
-        add_days = (years - 1) // 2
-        return min(15 + add_days, 25) * 8
-
-# ---------------------------------------------------------
-# 구글 시트 연동 함수 (캐시 타임아웃 2초 설정)
-# ---------------------------------------------------------
-@st.cache_data(ttl=2)
-def load_data():
+@st.cache_data(ttl=1)
+def load_data(sheet_name):
+    target_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
     try:
         sheet_url = st.secrets["SHEET_URL"]
-        res = requests.get(sheet_url)
+        res = requests.get(sheet_url, params={"sheetName": sheet_name})
         data = res.json()
         if not data or len(data) < 2:
-            return pd.DataFrame()
-        return pd.DataFrame(data[1:], columns=data[0])
+            return pd.DataFrame(columns=target_cols)
+        
+        df_res = pd.DataFrame(data[1:], columns=data[0])
+        
+        for col in df_res.columns:
+            df_res[col] = df_res[col].apply(clean_str)
+            
+        for c in target_cols:
+            if c not in df_res.columns:
+                df_res[c] = ""
+                
+        df_res = df_res[target_cols]
+        df_res = df_res[df_res["날짜"] != ""].copy()
+        return df_res
     except:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=target_cols)
 
 def save_to_sheet(payload):
     try:
@@ -95,40 +94,27 @@ def save_to_sheet(payload):
     except:
         return False
 
-# ---------------------------------------------------------
-# UI 구성
-# ---------------------------------------------------------
-st.title(f"👤 {WORKER_NAME} 근태 및 휴가 관리")
-st.write(f"**입사일:** {HIRE_DATE.strftime('%Y-%m-%d')}")
-
-annual_hours = get_annual_leave_hours(HIRE_DATE)
-st.metric("해당연도 부여 연차시간", f"{annual_hours}시간 (08:00 기준 {annual_hours // 8}일)")
-
+# UI
+st.title(f"👤 {WORKER_NAME} 근태 관리")
 st.markdown("---")
 
-df = load_data()
-
-# 근로자 데이터 필터링
-if not df.empty and "근로자명" in df.columns:
-    w_df = df[df["근로자명"] == WORKER_NAME]
-else:
-    w_df = pd.DataFrame()
+df = load_data(SHEET_NAME)
 
 categories = ["연차", "대체휴무", "병가", "공가"]
 
-# 요약 지표 출력
+# 상단 지표 계산 (A~G열 7개 구조 기반)
 cols = st.columns(4)
 for i, cat in enumerate(categories):
-    if not w_df.empty and "구분" in w_df.columns and "총시간" in w_df.columns:
-        cat_records = w_df[w_df["구분"] == cat]
-        t_mins = sum(hhmm_to_minutes(v) for v in cat_records["총시간"])
-    else:
-        t_mins = 0
+    t_mins = 0
+    if not df.empty and "구분" in df.columns and "총시간" in df.columns:
+        cat_df = df[df["구분"].str.strip() == cat]
+        for val in cat_df["총시간"]:
+            t_mins += hhmm_to_minutes(val)
+            
     cols[i].metric(f"총 {cat} 시간", minutes_to_hhmm(t_mins))
 
 st.markdown("---")
 
-# 입력 폼 (시간 단위 step=1800 적용 -> 30분 단위)
 st.subheader("📝 근무 / 휴가 신청 작성")
 with st.form("entry_form"):
     c1, c2, c3 = st.columns(3)
@@ -150,11 +136,11 @@ if submit:
     net_mins = calculate_net_minutes(s_str, e_str)
     
     if net_mins <= 0:
-        st.error("종료시간은 시작시간보다 나중이어야 합니다.")
+        st.error("종료시간은 시작시간보다 나중이어야 하며, 점심시간(12:00~13:00) 외 근무시간이 포함되어야 합니다.")
     else:
         total_hhmm = minutes_to_hhmm(net_mins)
         payload = {
-            "근로자명": WORKER_NAME,
+            "sheetName": SHEET_NAME,
             "날짜": req_date.strftime("%Y-%m-%d"),
             "시작시간": s_str,
             "종료시간": e_str,
@@ -166,18 +152,17 @@ if submit:
         
         with st.spinner("구글 시트에 기록 중입니다..."):
             if save_to_sheet(payload):
-                st.cache_data.clear()  # 캐시 강제 비우기
-                time.sleep(1)          # 구글 시트 반영 대기
+                st.cache_data.clear()
+                time.sleep(1)
                 st.success(f"성공적으로 저장되었습니다! (인정 시간: {total_hhmm})")
                 st.rerun()
             else:
-                st.error("저장에 실패했습니다. SHEET_URL을 확인하세요.")
+                st.error("저장에 실패했습니다.")
 
 st.markdown("---")
 
-# 개인 신청 기록
-st.subheader("📋 개인 신청 전체 기록")
-if not w_df.empty:
-    st.dataframe(w_df, use_container_width=True)
+st.subheader(f"📋 {WORKER_NAME} 신청 전체 기록")
+if not df.empty:
+    st.dataframe(df, use_container_width=True)
 else:
     st.info("등록된 기록이 없습니다.")
