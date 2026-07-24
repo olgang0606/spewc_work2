@@ -8,7 +8,7 @@ import re
 
 WORKER_NAME = "박은경"
 SHEET_NAME = WORKER_NAME
-HIRE_DATE = date(2016, 3, 1)
+HIRE_DATE = date(2017, 3, 1)
 
 st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", page_icon="👤", layout="wide")
 
