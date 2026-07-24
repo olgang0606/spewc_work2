@@ -6,11 +6,11 @@ import time
 import re
 
 # =========================================================
-# 👤 근로자 및 입사일 설정 (파일별 수정)
+# 
 # =========================================================
-WORKER_NAME = "박은경"  # 근로자 이름 ("채미혜", "박인미", "조윤희", "성지영")
+WORKER_NAME = "박은경"
 SHEET_NAME = WORKER_NAME
-HIRE_DATE = date(2016, 3, 1)  # 입사일 (YYYY, MM, DD)
+HIRE_DATE = date(2016, 3, 1)
 
 st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", page_icon="👤", layout="wide")
 
