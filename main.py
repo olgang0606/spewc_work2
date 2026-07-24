@@ -6,10 +6,7 @@ import calendar
 
 st.set_page_config(page_title="송파교육복지센터 근무 현황", layout="wide")
 
-# ---------------------------------------------------------
-# 공통 데이터 로드 함수
-# ---------------------------------------------------------
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=5)
 def load_data():
     try:
         sheet_url = st.secrets["SHEET_URL"]
@@ -20,10 +17,8 @@ def load_data():
         
         headers = data[0]
         rows = data[1:]
-        df = pd.DataFrame(rows, columns=headers)
-        return df
+        return pd.DataFrame(rows, columns=headers)
     except Exception as e:
-        st.error(f"구글 시트 데이터를 불러오는 중 오류 발생: {e}")
         return pd.DataFrame(columns=["근로자명", "날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"])
 
 def minutes_to_hhmm(total_minutes):
@@ -38,9 +33,6 @@ def hhmm_to_minutes(hhmm_str):
     except:
         return 0
 
-# ---------------------------------------------------------
-# 메인 화면 구성
-# ---------------------------------------------------------
 st.title("🏛️ 송파교육복지센터 근무 및 휴가 관리 현황")
 st.markdown("---")
 
@@ -54,11 +46,14 @@ st.subheader("📊 근로자별 구분 합계 요약")
 
 summary_data = []
 for w in workers:
-    w_df = df[df["근로자명"] == w] if "근로자명" in df.columns else pd.DataFrame()
+    w_df = df[df["근로자명"] == w] if not df.empty and "근로자명" in df.columns else pd.DataFrame()
     row = {"근로자명": w}
     for cat in categories:
-        cat_df = w_df[w_df["구분"] == cat] if not w_df.empty else pd.DataFrame()
-        total_mins = sum(hhmm_to_minutes(val) for val in cat_df["총시간"]) if not cat_df.empty else 0
+        if not w_df.empty and "구분" in w_df.columns and "총시간" in w_df.columns:
+            cat_df = w_df[w_df["구분"] == cat]
+            total_mins = sum(hhmm_to_minutes(val) for val in cat_df["총시간"])
+        else:
+            total_mins = 0
         row[cat] = minutes_to_hhmm(total_mins)
     summary_data.append(row)
 
@@ -77,23 +72,19 @@ with col_y:
 with col_m:
     selected_month = st.selectbox("월 선택", range(1, 13), index=today.month - 1)
 
-# 날짜 필터링
 if not df.empty and "날짜" in df.columns:
     df["날짜_dt"] = pd.to_datetime(df["날짜"], errors='coerce')
     month_df = df[(df["날짜_dt"].dt.year == selected_year) & (df["날짜_dt"].dt.month == selected_month)]
 else:
     month_df = pd.DataFrame()
 
-# 달력 매트릭스 생성
 cal = calendar.monthcalendar(selected_year, selected_month)
 week_days = ["월", "화", "수", "목", "금", "토", "일"]
 
-# 달력 헤더
 cols = st.columns(7)
 for i, day_name in enumerate(week_days):
     cols[i].markdown(f"**{day_name}**")
 
-# 달력 본문
 for week in cal:
     cols = st.columns(7)
     for i, day in enumerate(week):
