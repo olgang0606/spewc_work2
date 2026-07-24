@@ -8,7 +8,7 @@ from streamlit_calendar import calendar
 
 st.set_page_config(page_title="근태 관리 시스템", page_icon="🏢", layout="wide")
 
-# 근로자 설정 및 지정 색상 (24시간제 및 날짜 정확화)
+# 근로자 설정 및 지정 색상
 WORKERS = [
     {"name": "박은경", "hire_date": date(2016, 3, 1), "color": "#3182CE"}, # 파란색
     {"name": "채미혜", "hire_date": date(2018, 3, 1), "color": "#38A169"}, # 초록색
@@ -146,11 +146,10 @@ for w in WORKERS:
     cat_mins = {cat: 0 for cat in categories}
     
     if not df.empty and "날짜" in df.columns:
-        # 날짜 포맷 정규화 (2026. 3. 5 / 2026.3.5 / 2026-03-05 모두 대응)
         clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
         df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce').dt.date
         
-        # 1. 산정주기별 누적 시간 계산 (점심시간 차감 반영)
+        # 1. 산정주기별 누적 시간 계산
         period_df = df[(df['date_dt'] >= p_start) & (df['date_dt'] <= p_end)]
         for cat in categories:
             cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
@@ -203,7 +202,7 @@ st.dataframe(summary_df, use_container_width=True, hide_index=True)
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 📅 월간 달력 일정표 (범례 괄호 제거 & 24시간제)
+# 📅 월간 달력 일정표 (24시간제 표기 적용)
 # ---------------------------------------------------------
 st.subheader("📅 월간 근태 일정표")
 
@@ -227,10 +226,16 @@ calendar_options = {
     },
     "initialView": "dayGridMonth",
     "locale": "ko",
+    # ✨ 24시간제 표기 옵션 추가
+    "eventTimeFormat": {
+        "hour": "2-digit",
+        "minute": "2-digit",
+        "hour12": False
+    },
     "slotLabelFormat": {
         "hour": "2-digit",
         "minute": "2-digit",
-        "hour12": False # 24시간제 표기 설정
+        "hour12": False
     }
 }
 
