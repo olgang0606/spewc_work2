@@ -174,7 +174,8 @@ ot_df = load_sheet_data("시간외근무", ot_cols)
 
 if not ot_df.empty and "날짜" in ot_df.columns:
     clean_ot_dates = ot_df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
-    ot_df['date_dt'] = pd.to_datetime(clean_ot_dates, errors='coerce').dt.date
+    # .dt.date 대신 datetime64[ns] 타입으로 유지
+    ot_df['date_dt'] = pd.to_datetime(clean_ot_dates, errors='coerce')
 else:
     ot_df['date_dt'] = pd.NaT
 
@@ -186,13 +187,19 @@ leave_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "
 for w in WORKERS:
     df = load_sheet_data(w["name"], leave_cols)
     p_start, p_end = get_current_period(w["hire_date"])
+    
+    # 비교를 위한 Timestamp 변환
+    p_start_dt = pd.to_datetime(p_start)
+    p_end_dt = pd.to_datetime(p_end)
+    
     cat_mins = {cat: 0 for cat in categories}
     
     if not df.empty and "날짜" in df.columns:
         clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
-        df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce').dt.date
+        df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce')
         
-        period_df = df[(df['date_dt'] >= p_start) & (df['date_dt'] <= p_end)]
+        # 개인 휴가 산정주기 필터링
+        period_df = df[(df['date_dt'] >= p_start_dt) & (df['date_dt'] <= p_end_dt)]
         for cat in categories:
             cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
             total_m = sum(calculate_net_minutes(r["시작시간"], r["종료시간"]) for _, r in cat_df.iterrows())
@@ -215,7 +222,12 @@ for w in WORKERS:
                     "textColor": "#FFFFFF"
                 })
 
-    ot_worker_df = ot_df[(ot_df["이름"].astype(str).str.strip() == w["name"]) & (ot_df["date_dt"] >= p_start) & (ot_df["date_dt"] <= p_end)]
+    # 시간외근무 필터링 (p_start_dt, p_end_dt 적용으로 에러 해결!)
+    ot_worker_df = ot_df[
+        (ot_df["이름"].astype(str).str.strip() == w["name"]) & 
+        (ot_df["date_dt"] >= p_start_dt) & 
+        (ot_df["date_dt"] <= p_end_dt)
+    ]
     
     total_ot_pay_mins = 0
     total_ot_allowance = 0
