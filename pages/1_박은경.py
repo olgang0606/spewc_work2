@@ -10,11 +10,43 @@ import re
 # =========================================================
 WORKER_NAME = "박은경"
 SHEET_NAME = WORKER_NAME
+HIRE_DATE = date(2016, 3, 1)
 
 st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", page_icon="👤", layout="wide")
 
 # ---------------------------------------------------------
-# 데이터 데이터 정제 및 시간 계산 헬퍼 함수
+# 입사일 기준 현재 산정 주기(1년) 계산 함수
+# ---------------------------------------------------------
+def get_current_period(hire_d, ref_date=None):
+    if ref_date is None:
+        ref_date = date.today()
+    
+    # 올해 입사일 계산
+    try:
+        this_year_hire = date(ref_date.year, hire_d.month, hire_d.day)
+    except ValueError: # 윤년 2/29 예외 처리
+        this_year_hire = date(ref_date.year, hire_d.month, 28)
+        
+    if ref_date >= this_year_hire:
+        start_date = this_year_hire
+        try:
+            end_date = date(ref_date.year + 1, hire_d.month, hire_d.day) - pd.Timedelta(days=1)
+        except ValueError:
+            end_date = date(ref_date.year + 1, hire_d.month, 28) - pd.Timedelta(days=1)
+    else:
+        try:
+            start_date = date(ref_date.year - 1, hire_d.month, hire_d.day)
+        except ValueError:
+            start_date = date(ref_date.year - 1, hire_d.month, 28)
+        end_date = this_year_hire - pd.Timedelta(days=1)
+        
+    if isinstance(end_date, pd.Timestamp):
+        end_date = end_date.date()
+        
+    return start_date, end_date
+
+# ---------------------------------------------------------
+# 시간 계산 및 정제 헬퍼 함수
 # ---------------------------------------------------------
 def clean_str(val):
     if pd.isna(val) or val is None:
@@ -37,6 +69,7 @@ def minutes_to_hhmm(mins):
     mins = max(0, int(mins))
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
+# 12:00~13:00 점심시간 제외 실근무/휴가 시간 계산
 def calculate_net_minutes(start_str, end_str):
     try:
         fmt = "%H:%M"
@@ -48,7 +81,7 @@ def calculate_net_minutes(start_str, end_str):
         
         total_mins = int((t_end - t_start).total_seconds() // 60)
         
-        # 12:00~13:00 점심시간 포함 시 차감
+        # 12:00~13:00 점심시간 구간 포함 시 자동 차감
         lunch_start = datetime.strptime("12:00", fmt)
         lunch_end = datetime.strptime("13:00", fmt)
         
@@ -64,7 +97,7 @@ def calculate_net_minutes(start_str, end_str):
         return 0
 
 # ---------------------------------------------------------
-# 구글 시트 연동 함수 (조회 & 저장)
+# 구글 시트 데이터 로드 및 저장
 # ---------------------------------------------------------
 @st.cache_data(ttl=1)
 def load_data(sheet_name):
@@ -103,25 +136,37 @@ def save_to_sheet(payload):
 # UI 화면 구성
 # ---------------------------------------------------------
 st.title(f"👤 {WORKER_NAME} 근태 관리")
+
+# 입사일 및 현재 1년 산정 주기 안내
+period_start, period_end = get_current_period(HIRE_DATE)
+st.caption(f"📅 **입사일:** {HIRE_DATE.strftime('%Y-%m-%d')} | **현재 산정 주기 (1년):** {period_start.strftime('%Y-%m-%d')} ~ {period_end.strftime('%Y-%m-%d')}")
 st.markdown("---")
 
 df = load_data(SHEET_NAME)
 categories = ["연차", "대체휴무", "병가", "공가"]
 
-# 1. 상단 근무 유형별 누적 사용시간 지표
+# 1. 상단 근무 유형별 누적 사용시간 지표 (현재 산정 주기 1년 기준 필터링)
 cols = st.columns(4)
+
+if not df.empty and "날짜" in df.columns:
+    # 날짜 데이터 변환 및 현 주기에 맞는 데이터만 필터링
+    df['date_dt'] = pd.to_datetime(df['날짜'], errors='coerce').dt.date
+    period_df = df[(df['date_dt'] >= period_start) & (df['date_dt'] <= period_end)]
+else:
+    period_df = pd.DataFrame()
+
 for i, cat in enumerate(categories):
     t_mins = 0
-    if not df.empty and "구분" in df.columns and "총시간" in df.columns:
-        cat_df = df[df["구분"].str.strip() == cat]
+    if not period_df.empty and "구분" in period_df.columns and "총시간" in period_df.columns:
+        cat_df = period_df[period_df["구분"].str.strip() == cat]
         for val in cat_df["총시간"]:
             t_mins += hhmm_to_minutes(val)
             
-    cols[i].metric(f"총 {cat} 시간", minutes_to_hhmm(t_mins))
+    cols[i].metric(f"총 {cat} 시간 (당해연도)", minutes_to_hhmm(t_mins))
 
 st.markdown("---")
 
-# 2. 근무 / 휴가 신청 폼 (날짜, 시작/종료시간, 구분, 목적지, 사유)
+# 2. 근무 / 휴가 신청 폼
 st.subheader("📝 근무 / 휴가 신청 작성")
 with st.form("entry_form"):
     c1, c2, c3 = st.columns(3)
@@ -137,7 +182,6 @@ with st.form("entry_form"):
         
     submit = st.form_submit_button("시트에 저장하기")
 
-# 저장 처리 로직
 if submit:
     s_str = start_t.strftime("%H:%M")
     e_str = end_t.strftime("%H:%M")
@@ -165,13 +209,14 @@ if submit:
                 st.success(f"성공적으로 저장되었습니다! (인정 시간: {total_hhmm})")
                 st.rerun()
             else:
-                st.error("저장에 실패했습니다. 앱스 스크립트 연결을 확인해 주세요.")
+                st.error("저장에 실패했습니다.")
 
 st.markdown("---")
 
-# 3. 개인별 신청 전체 기록 테이블
+# 3. 개인별 신청 전체 기록
 st.subheader(f"📋 {WORKER_NAME} 신청 전체 기록")
 if not df.empty:
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    disp_df = df.drop(columns=['date_dt'], errors='ignore')
+    st.dataframe(disp_df, use_container_width=True, hide_index=True)
 else:
     st.info("등록된 신청 기록이 없습니다.")
