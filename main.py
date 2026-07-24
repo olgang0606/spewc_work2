@@ -204,34 +204,39 @@ for w in WORKERS:
                     "textColor": "#FFFFFF"
                 })
 
-    # 시간외근무 필터링
+    # 시간외근무 개인별 산정주기 필터링
     ot_worker_df = ot_df[
         (ot_df["이름"].astype(str).str.strip() == w["name"]) & 
         (ot_df["date_dt"] >= p_start_dt) & 
         (ot_df["date_dt"] <= p_end_dt)
     ]
     
-    # 월별 그룹화하여 1시간 미만 버림 적용 계산
-    ot_worker_df['year_month'] = ot_worker_df['date_dt'].dt.to_period('M')
-    
     total_ot_pay_mins = 0
     total_ordinary_mins = 0
     total_ot_allowance = 0
     
-    for ym, group in ot_worker_df.groupby('year_month'):
-        monthly_ot_mins = sum(hhmm_to_minutes(r["시간외수당수당적용시간"]) for _, r in group.iterrows())
-        monthly_ord_mins = sum(hhmm_to_minutes(r["통상임금적용시간"]) for _, r in group.iterrows())
+    if not ot_worker_df.empty:
+        # 월별로 그룹화하여 월 단위 1시간 미만 절사(버림)
+        ot_worker_df['year_month'] = ot_worker_df['date_dt'].dt.to_period('M')
         
-        # 월 단위 합산 후 1시간 미만 절사(버림)
-        total_ot_pay_mins += truncate_minutes_monthly(monthly_ot_mins)
-        total_ordinary_mins += truncate_minutes_monthly(monthly_ord_mins)
-        
-        for _, row in group.iterrows():
-            try:
-                pay_val = int(str(row["지급수당"]).replace(",", "").replace("원", "").strip())
-            except Exception:
-                pay_val = 0
-            total_ot_allowance += pay_val
+        for ym, group in ot_worker_df.groupby('year_month'):
+            # 컬럼명 다양성 방어 코드 (시간외수당수당적용시간 or 수당적용시간)
+            ot_col_name = "시간외수당수당적용시간" if "시간외수당수당적용시간" in group.columns else "수당적용시간"
+            ord_col_name = "통상임금적용시간"
+            
+            monthly_ot_mins = sum(hhmm_to_minutes(r.get(ot_col_name, "00:00")) for _, r in group.iterrows())
+            monthly_ord_mins = sum(hhmm_to_minutes(r.get(ord_col_name, "00:00")) for _, r in group.iterrows())
+            
+            # 월 단위 합산 후 1시간 미만 절사
+            total_ot_pay_mins += truncate_minutes_monthly(monthly_ot_mins)
+            total_ordinary_mins += truncate_minutes_monthly(monthly_ord_mins)
+            
+            for _, row in group.iterrows():
+                try:
+                    pay_val = int(str(row.get("지급수당", "0")).replace(",", "").replace("원", "").strip())
+                except Exception:
+                    pay_val = 0
+                total_ot_allowance += pay_val
 
     summary_list.append({
         "근로자명": w["name"],
