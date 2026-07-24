@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import requests
 from datetime import datetime, date
 from streamlit_calendar import calendar as st_calendar
 
@@ -19,24 +20,57 @@ EMPLOYEES = {
 CATEGORIES = ["연차", "대체휴무", "병가", "공가"]
 
 # -----------------------------------------------------------------------------
-# 2. 구글 시트(CSV URL) 데이터 불러오기 함수 (무료/비인증 방식)
+# 2. 구글 시트 연동 함수 (비밀금고 SHEET_URL 활용)
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=60)  # 60초마다 구글 시트 데이터 자동 캐시 갱신
-def load_data_from_csv():
-    """구글 시트에서 공개한 CSV URL을 통해 데이터 읽어오기"""
+@st.cache_data(ttl=30)
+def load_data_from_sheet():
+    """SHEET_URL을 사용하여 구글 시트 데이터를 CSV 형태로 로드"""
     try:
-        csv_url = st.secrets["gsheets"]["csv_url"]
+        if "SHEET_URL" not in st.secrets:
+            st.error("secrets.toml에 'SHEET_URL'이 설정되어 있지 않습니다.")
+            return pd.DataFrame(columns=["시각", "팀원", "메뉴", "구분", "날짜"])
+            
+        sheet_url = st.secrets["SHEET_URL"]
+        
+        # /exec 기반 웹앱 주소일 경우 웹 공개 CSV 주소로 자동 변환 시도
+        if "/exec" in sheet_url:
+            csv_url = sheet_url.replace("/exec", "/pub?output=csv")
+        else:
+            csv_url = sheet_url
+            
         df = pd.read_csv(csv_url)
         
-        # 필수 칼럼 확인 및 데이터 전처리
-        if not df.empty:
-            df["날짜"] = pd.to_datetime(df["날짜"]).dt.date
-            df["총시간_분"] = pd.to_numeric(df["총시간_분"], errors='coerce').fillna(0).astype(int)
+        if not df.empty and "시각" in df.columns:
+            # 시각 칼럼에서 날짜 데이터 추출
+            df["날짜"] = pd.to_datetime(df["시각"]).dt.date
             return df
     except Exception as e:
-        st.error(f"구글 시트 데이터를 불러오는데 실패했습니다: {e}")
+        st.warning(f"구글 시트 데이터 로드 안내: {e}")
         
-    return pd.DataFrame(columns=["근로자", "날짜", "시작시간", "종료시간", "총시간", "총시간_분", "구분", "목적지", "사유"])
+    return pd.DataFrame(columns=["시각", "팀원", "메뉴", "구분", "날짜"])
+
+def send_to_google_sheet(member: str, menu_val: str, type_val: str) -> bool:
+    """
+    requests 모듈을 통해 Google Apps Script 웹 앱으로 데이터 전송
+    파라미터: member, menu, type
+    """
+    try:
+        if "SHEET_URL" not in st.secrets:
+            st.error("secrets.toml에 'SHEET_URL'이 누락되었습니다.")
+            return False
+            
+        sheet_url = st.secrets["SHEET_URL"]
+        params = {
+            "member": member,
+            "menu": menu_val,
+            "type": type_val
+        }
+        # GAS 웹앱 302 리다이렉트 대응을 위해 allow_redirects=True 사용
+        response = requests.get(sheet_url, params=params, allow_redirects=True, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        st.error(f"전송 실패: {e}")
+        return False
 
 def calculate_annual_leave_hours(hire_date: date, target_year: int) -> int:
     """근로기준법 기준 연차 시간 계산 (1일 = 8시간)"""
@@ -57,39 +91,34 @@ def minutes_to_hhmm(minutes: int) -> str:
     return f"{hours:02d}:{mins:02d}"
 
 # -----------------------------------------------------------------------------
-# 3. 데이터 로드
+# 3. 데이터 로드 및 사이드바 메뉴
 # -----------------------------------------------------------------------------
-df_all = load_data_from_csv()
+df_all = load_data_from_sheet()
 
-# -----------------------------------------------------------------------------
-# 4. 사이드바 메뉴
-# -----------------------------------------------------------------------------
 st.sidebar.title("📌 송파교육복지센터")
 
 menu_options = ["메인 (월간 달력)"] + list(EMPLOYEES.keys())
 selected_menu = st.sidebar.radio("메뉴 이동", menu_options)
 
-# 데이터 수동 새로고침 버튼
-if st.sidebar.button("🔄 구글 시트 데이터 새로고침"):
+if st.sidebar.button("🔄 구글 시트 새로고침"):
     st.cache_data.clear()
     st.rerun()
 
 # -----------------------------------------------------------------------------
-# PAGE 1: 메인 페이지 (월간 달력 및 전체 현황)
+# PAGE 1: 메인 페이지 (월간 달력)
 # -----------------------------------------------------------------------------
 if selected_menu == "메인 (월간 달력)":
     st.header("🗓️ 근로자별 월간 근무 현황 달력")
     
-    # 1. 근로자별 구분 합계 요약 표
-    st.subheader("📊 근로자별 구분 합계 (hh:mm)")
+    st.subheader("📊 근로자별 구분 현황")
     
     summary_data = []
     for emp_name in EMPLOYEES.keys():
-        emp_df = df_all[df_all["근로자"] == emp_name]
-        row = {"근로자": emp_name}
+        emp_df = df_all[df_all["팀원"] == emp_name] if "팀원" in df_all.columns else pd.DataFrame()
+        row = {"팀원": emp_name}
         for cat in CATEGORIES:
-            total_mins = emp_df[emp_df["구분"] == cat]["총시간_분"].sum()
-            row[cat] = minutes_to_hhmm(total_mins)
+            count = len(emp_df[emp_df["구분"] == cat]) if not emp_df.empty else 0
+            row[cat] = f"{count}건"
         summary_data.append(row)
         
     summary_df = pd.DataFrame(summary_data)
@@ -97,7 +126,6 @@ if selected_menu == "메인 (월간 달력)":
     
     st.markdown("---")
     
-    # 2. 월간 일정표 (Calendar)
     st.subheader("📅 월간 일정표")
     
     calendar_events = []
@@ -108,14 +136,16 @@ if selected_menu == "메인 (월간 달력)":
         "공가": "#008000"
     }
     
-    for _, record in df_all.iterrows():
-        calendar_events.append({
-            "title": f"[{record['근로자']}] {record['구분']} ({record['총시간']})",
-            "start": str(record["날짜"]),
-            "end": str(record["날짜"]),
-            "color": color_map.get(record["구분"], "#3D5A80")
-        })
-        
+    if not df_all.empty and "팀원" in df_all.columns:
+        for _, record in df_all.iterrows():
+            event_date = str(record["날짜"]) if "날짜" in record and pd.notnull(record["날짜"]) else date.today().strftime("%Y-%m-%d")
+            calendar_events.append({
+                "title": f"[{record.get('팀원', '')}] {record.get('구분', '')} - {record.get('메뉴', '')}",
+                "start": event_date,
+                "end": event_date,
+                "color": color_map.get(record.get("구분", ""), "#3D5A80")
+            })
+            
     calendar_options = {
         "headerToolbar": {
             "left": "prev,next today",
@@ -129,7 +159,7 @@ if selected_menu == "메인 (월간 달력)":
     st_calendar(events=calendar_events, options=calendar_options)
 
 # -----------------------------------------------------------------------------
-# PAGE 2~6: 근로자별 개별 페이지
+# PAGE 2~6: 근로자별 개별 페이지 및 입력 폼
 # -----------------------------------------------------------------------------
 else:
     selected_emp = selected_menu
@@ -138,38 +168,51 @@ else:
     
     st.header(f"👤 {selected_emp} 근로자 현황")
     
-    # 근로자 연차 기준 계산
     annual_hours = calculate_annual_leave_hours(hire_date, current_year)
     annual_hhmm = minutes_to_hhmm(annual_hours * 60)
     
-    # 개인별 사용 연차 계산
-    emp_records = df_all[df_all["근로자"] == selected_emp]
-    used_annual_mins = emp_records[emp_records["구분"] == "연차"]["총시간_분"].sum()
-    
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         st.metric("입사일", hire_date.strftime("%Y-%m-%d"))
     with col2:
         st.metric(f"{current_year}년 산정 연차 시간", f"{annual_hours}시간 ({annual_hhmm})")
-    with col3:
-        st.metric("사용 연차 시간", minutes_to_hhmm(used_annual_mins))
         
     st.markdown("---")
     
-    # 개인별 상세 총괄표
-    st.subheader(f"📋 {selected_emp} 근무/휴무 총괄표")
-    
-    if not emp_records.empty:
-        # 구분별 총합계 카드
-        cat_cols = st.columns(4)
-        for idx, cat in enumerate(CATEGORIES):
-            cat_mins = emp_records[emp_records["구분"] == cat]["총시간_분"].sum()
-            cat_cols[idx].metric(f"총 {cat}", minutes_to_hhmm(cat_mins))
+    # 근무/휴무 기록 추가 폼
+    with st.expander("➕ 근무/휴무 기록 접수하기", expanded=True):
+        with st.form("add_record_form"):
+            c1, c2 = st.columns(2)
+            menu_input = c1.text_input("메뉴 (내용/사유)", placeholder="예: 오전 연차, 병가 신청 등")
+            type_input = c2.selectbox("구분", CATEGORIES)
             
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        # 상세 데이터 테이블 표시
-        display_df = emp_records[["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]].sort_values(by="날짜", ascending=False)
-        st.dataframe(display_df, use_container_width=True)
+            submit = st.form_submit_button("구글 시트로 전송")
+            
+            if submit:
+                if not menu_input.strip():
+                    st.error("메뉴(내용)를 입력해주세요.")
+                else:
+                    success = send_to_google_sheet(
+                        member=selected_emp,
+                        menu_val=menu_input,
+                        type_val=type_input
+                    )
+                    
+                    if success:
+                        st.success("구글 시트에 성공적으로 접수되었습니다!")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("전송 중 오류가 발생했습니다. SHEET_URL을 확인해주세요.")
+
+    # 개별 총괄표
+    st.subheader(f"📋 {selected_emp} 접수 내역")
+    
+    if not df_all.empty and "팀원" in df_all.columns:
+        emp_df = df_all[df_all["팀원"] == selected_emp]
+        if not emp_df.empty:
+            st.dataframe(emp_df[["시각", "팀원", "메뉴", "구분"]], use_container_width=True)
+        else:
+            st.info("접수된 기록이 없습니다.")
     else:
-        st.info("구글 시트에 등록된 근무/휴무 내역이 없습니다.")
+        st.info("데이터를 불러오는 중이거나 기록이 없습니다.")
