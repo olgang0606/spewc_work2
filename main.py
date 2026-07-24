@@ -157,18 +157,19 @@ ot_cols = [
 ]
 ot_df = load_sheet_data("시간외근무", ot_cols)
 
+# 시간외근무 날짜 변환 (유연한 파싱)
 if not ot_df.empty and "날짜" in ot_df.columns:
-    clean_ot_dates = ot_df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
+    clean_ot_dates = ot_df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.replace("/", "-").str.strip()
     ot_df['date_dt'] = pd.to_datetime(clean_ot_dates, errors='coerce')
 else:
-    ot_df['date_dt'] = pd.NaT
+    ot_df = pd.DataFrame()
 
 summary_list = []
 calendar_events = []
 categories = ["연차", "대체휴무", "병가", "공가"]
 leave_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
 
-# 모든 근로자의 시간외수당 적용 기준년도 (현재 년도 01-01 ~ 12-31)
+# 현재 연도 (1월 1일 ~ 12월 31일)
 current_year = date.today().year
 ot_start_dt = pd.to_datetime(f"{current_year}-01-01")
 ot_end_dt = pd.to_datetime(f"{current_year}-12-31")
@@ -176,30 +177,29 @@ ot_end_dt = pd.to_datetime(f"{current_year}-12-31")
 for w in WORKERS:
     df = load_sheet_data(w["name"], leave_cols)
     p_start, p_end = get_current_period(w["hire_date"])
-    
     p_start_dt = pd.to_datetime(p_start)
     p_end_dt = pd.to_datetime(p_end)
     
     cat_mins = {cat: 0 for cat in categories}
     
-    # 1. 휴가(연차, 대체휴무, 병가, 공가)는 입사일 산정주기 기준 집계
+    # 1. 휴가 항목 (입사일 산정주기 기준)
     if not df.empty and "날짜" in df.columns:
-        clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
+        clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.replace("/", "-").str.strip()
         df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce')
         
         period_df = df[(df['date_dt'] >= p_start_dt) & (df['date_dt'] <= p_end_dt)]
         for cat in categories:
             cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
-            total_m = sum(calculate_net_minutes(r["시작시간"], r["종료시간"]) for _, r in cat_df.iterrows())
+            total_m = sum(calculate_net_minutes(r.get("시작시간", ""), r.get("종료시간", "")) for _, r in cat_df.iterrows())
             cat_mins[cat] = total_m
 
         for idx, row in df.iterrows():
-            if pd.isna(row['date_dt']):
+            if pd.isna(row.get('date_dt')):
                 continue
             d_str = row['date_dt'].strftime("%Y-%m-%d")
-            s_time = extract_time_str(row['시작시간'])
-            e_time = extract_time_str(row['종료시간'])
-            cat = str(row['구분']).strip()
+            s_time = extract_time_str(row.get('시작시간', ''))
+            e_time = extract_time_str(row.get('종료시간', ''))
+            cat = str(row.get('구분', '')).strip()
             
             if ":" in s_time and ":" in e_time:
                 calendar_events.append({
@@ -210,38 +210,44 @@ for w in WORKERS:
                     "textColor": "#FFFFFF"
                 })
 
-    # 2. 시간외수당은 모든 근로자가 01-01 ~ 12-31 기준으로 필터링 및 집계
-    ot_worker_df = ot_df[
-        (ot_df["이름"].astype(str).str.strip() == w["name"]) & 
-        (ot_df["date_dt"] >= ot_start_dt) & 
-        (ot_df["date_dt"] <= ot_end_dt)
-    ]
-    
+    # 2. 시간외수당 항목 (01-01 ~ 12-31 기준)
     total_ot_pay_mins = 0
     total_ordinary_mins = 0
     total_ot_allowance = 0
-    
-    if not ot_worker_df.empty:
-        # 월별로 그룹화하여 월 단위 1시간 미만 절사(버림)
-        ot_worker_df['year_month'] = ot_worker_df['date_dt'].dt.to_period('M')
-        
-        for ym, group in ot_worker_df.groupby('year_month'):
-            ot_col_name = "시간외수당수당적용시간" if "시간외수당수당적용시간" in group.columns else "수당적용시간"
-            ord_col_name = "통상임금적용시간"
+
+    if not ot_df.empty and 'date_dt' in ot_df.columns:
+        # 근로자 이름 및 1/1~12/31 날짜 필터링
+        ot_worker_df = ot_df[
+            (ot_df["이름"].astype(str).str.strip() == w["name"]) & 
+            (ot_df["date_dt"] >= ot_start_dt) & 
+            (ot_df["date_dt"] <= ot_end_dt)
+        ].copy()
+
+        if not ot_worker_df.empty:
+            ot_worker_df['year_month'] = ot_worker_df['date_dt'].dt.to_period('M')
             
-            monthly_ot_mins = sum(hhmm_to_minutes(r.get(ot_col_name, "00:00")) for _, r in group.iterrows())
-            monthly_ord_mins = sum(hhmm_to_minutes(r.get(ord_col_name, "00:00")) for _, r in group.iterrows())
-            
-            # 월 단위 합산 후 1시간 미만 절사
-            total_ot_pay_mins += truncate_minutes_monthly(monthly_ot_mins)
-            total_ordinary_mins += truncate_minutes_monthly(monthly_ord_mins)
-            
-            for _, row in group.iterrows():
-                try:
-                    pay_val = int(str(row.get("지급수당", "0")).replace(",", "").replace("원", "").strip())
-                except Exception:
-                    pay_val = 0
-                total_ot_allowance += pay_val
+            for ym, group in ot_worker_df.groupby('year_month'):
+                monthly_ot_mins = 0
+                monthly_ord_mins = 0
+                
+                for _, row in group.iterrows():
+                    # 시간외수당 적용시간 값 찾기 (다양한 열 이름 대응)
+                    ot_val = row.get("시간외수당수당적용시간") or row.get("시간외수당적용시간") or row.get("수당적용시간") or "00:00"
+                    ord_val = row.get("통상임금적용시간") or row.get("통상임금 적용시간") or "00:00"
+                    
+                    monthly_ot_mins += hhmm_to_minutes(ot_val)
+                    monthly_ord_mins += hhmm_to_minutes(ord_val)
+                    
+                    # 지급수당 금액 계산
+                    pay_str = str(row.get("지급수당", "0")).replace(",", "").replace("원", "").strip()
+                    try:
+                        total_ot_allowance += int(pay_str)
+                    except ValueError:
+                        pass
+                
+                # 월 단위 1시간 미만 절사(버림)
+                total_ot_pay_mins += truncate_minutes_monthly(monthly_ot_mins)
+                total_ordinary_mins += truncate_minutes_monthly(monthly_ord_mins)
 
     summary_list.append({
         "근로자명": w["name"],
@@ -254,7 +260,6 @@ for w in WORKERS:
         "시간외수당 적용시간": minutes_to_hhmm(total_ot_pay_mins),
         "통상임금 적용시간": minutes_to_hhmm(total_ordinary_mins),
         "시간외 총 지급수당": f"{total_ot_allowance:,}원"
-    })
 if not ot_df.empty:
     for _, row in ot_df.iterrows():
         if pd.isna(row['date_dt']):
