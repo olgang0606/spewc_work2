@@ -5,11 +5,17 @@ from google.oauth2.service_account import Credentials
 from datetime import date, datetime
 import re
 
+# =========================================================
+# 근로자 정보 설정 (다른 근로자 파일 생성 시 이 부분만 변경)
+# =========================================================
 WORKER_NAME = "조윤희"
 HIRE_DATE = date(2023, 8, 1)
 
 st.set_page_config(page_title=f"{WORKER_NAME} 근태 관리", page_icon="👤", layout="wide")
 
+# ---------------------------------------------------------
+# Google Sheets API 연동
+# ---------------------------------------------------------
 @st.cache_resource
 def get_gspread_client():
     scopes = [
@@ -22,11 +28,21 @@ def get_gspread_client():
     )
     return gspread.authorize(credentials)
 
+def get_spreadsheet():
+    gc = get_gspread_client()
+    return gc.open_by_url(st.secrets["SPREADSHEET_URL"])
+
+# ---------------------------------------------------------
+# 시간 계산 및 변환 유틸리티
+# ---------------------------------------------------------
 def extract_time_str(val):
+    if pd.isna(val) or val is None:
+        return ""
     s = str(val).strip().replace("'", "").replace('"', '')
     match = re.search(r'(\d{1,2}:\d{2})', s)
     return match.group(1) if match else ""
 
+# 개별 근로자 탭 총시간 = 종료시간 - 시작시간 (점심시간 12:00~13:00 차감 포함)
 def calculate_net_minutes(start_str, end_str):
     s_hhmm = extract_time_str(start_str)
     e_hhmm = extract_time_str(end_str)
@@ -43,6 +59,7 @@ def calculate_net_minutes(start_str, end_str):
             
         total_mins = int((e_dt - s_dt).total_seconds() // 60)
         
+        # 휴게시간 (12:00~13:00) 차감
         lunch_start = datetime.strptime("12:00", "%H:%M")
         lunch_end = datetime.strptime("13:00", "%H:%M")
         
@@ -57,6 +74,7 @@ def minutes_to_hhmm(mins):
     mins = max(0, int(mins))
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
+# 입사일 기준 산정주기 구하기
 def get_current_period(hire_d, ref_date=None):
     if ref_date is None:
         ref_date = date.today()
@@ -82,12 +100,14 @@ def get_current_period(hire_d, ref_date=None):
         end_date = end_date.date()
     return start_date, end_date
 
+# ---------------------------------------------------------
+# 데이터 로드
+# ---------------------------------------------------------
 @st.cache_data(ttl=3)
 def load_data():
     target_cols = ["날짜", "시작시간", "종료시간", "총시간", "구분", "목적지", "사유"]
     try:
-        gc = get_gspread_client()
-        sh = gc.open_by_url(st.secrets["SPREADSHEET_URL"])
+        sh = get_spreadsheet()
         worksheet = sh.worksheet(WORKER_NAME)
         records = worksheet.get_all_records()
         if not records:
@@ -103,12 +123,15 @@ def load_data():
 
 df, worksheet = load_data()
 
-# 화면 출력 전 총시간 자동 보완
+# 화면 출력 전 총시간 자동 보완 (종료시간 - 시작시간)
 if not df.empty:
     for idx, row in df.iterrows():
         m = calculate_net_minutes(row["시작시간"], row["종료시간"])
         df.at[idx, "총시간"] = minutes_to_hhmm(m)
 
+# ---------------------------------------------------------
+# UI 및 상단 통계
+# ---------------------------------------------------------
 st.title(f"👤 {WORKER_NAME} 근태 관리")
 p_start, p_end = get_current_period(HIRE_DATE)
 st.caption(f"📅 현재 산정주기: {p_start.strftime('%Y-%m-%d')} ~ {p_end.strftime('%Y-%m-%d')}")
@@ -120,6 +143,7 @@ if not df.empty and "날짜" in df.columns:
     clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
     df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce').dt.date
     
+    # 현재 산정주기 내 데이터만 필터링
     period_df = df[(df['date_dt'] >= p_start) & (df['date_dt'] <= p_end)]
     
     for cat in categories:
@@ -134,6 +158,9 @@ for i, cat in enumerate(categories):
 
 st.markdown("---")
 
+# ---------------------------------------------------------
+# 근무 / 휴가 신청 작성 폼
+# ---------------------------------------------------------
 st.subheader("📝 근무 / 휴가 신청 작성")
 
 with st.form("leave_form", clear_on_submit=True):
@@ -142,9 +169,9 @@ with st.form("leave_form", clear_on_submit=True):
         req_date = st.date_input("날짜", date.today())
     with col2:
         time_options = [f"{h:02d}:{m:02d}" for h in range(8, 21) for m in (0, 30)]
-        start_time = st.selectbox("시작시간", time_options, index=2)
+        start_time = st.selectbox("시작시간", time_options, index=2) # 09:00
     with col3:
-        end_time = st.selectbox("종료시간", time_options, index=20)
+        end_time = st.selectbox("종료시간", time_options, index=20)   # 18:00
         
     col4, col5, col6 = st.columns(3)
     with col4:
@@ -160,6 +187,7 @@ with st.form("leave_form", clear_on_submit=True):
         if worksheet is None:
             st.error("구글 시트에 연결할 수 없습니다.")
         else:
+            # 총시간 = 종료시간 - 시작시간
             net_m = calculate_net_minutes(start_time, end_time)
             calc_total_str = minutes_to_hhmm(net_m)
             
@@ -175,7 +203,7 @@ with st.form("leave_form", clear_on_submit=True):
             
             try:
                 worksheet.append_row(new_row)
-                st.success(f"성공적으로 저장되었습니다! (산정 시간: {calc_total_str})")
+                st.success(f"성공적으로 저장되었습니다! (산정 총시간: {calc_total_str})")
                 st.cache_data.clear()
                 st.rerun()
             except Exception as e:
@@ -183,6 +211,9 @@ with st.form("leave_form", clear_on_submit=True):
 
 st.markdown("---")
 
+# ---------------------------------------------------------
+# 저장된 목록 출력
+# ---------------------------------------------------------
 st.subheader(f"📋 {WORKER_NAME} 신청 전체 기록")
 
 if not df.empty:
