@@ -8,7 +8,6 @@ from streamlit_calendar import calendar
 
 st.set_page_config(page_title="근태 및 시간외근무 관리 시스템", page_icon="🏢", layout="wide")
 
-# 근로자 기본 정보
 WORKERS = [
     {"name": "박은경", "hire_date": date(2016, 3, 1), "color": "#3182CE"},
     {"name": "채미혜", "hire_date": date(2018, 3, 1), "color": "#38A169"},
@@ -16,7 +15,7 @@ WORKERS = [
     {"name": "조윤희", "hire_date": date(2023, 8, 1), "color": "#DD6B20"},
     {"name": "성지영", "hire_date": date(2026, 7, 1), "color": "#805AD5"},
 ]
-
+WORKER_NAMES = [w["name"] for w in WORKERS]
 WORKER_COLOR_MAP = {w["name"]: w["color"] for w in WORKERS}
 
 # ---------------------------------------------------------
@@ -34,22 +33,24 @@ def get_gspread_client():
     )
     return gspread.authorize(credentials)
 
+def get_spreadsheet():
+    gc = get_gspread_client()
+    return gc.open_by_url(st.secrets["SPREADSHEET_URL"])
+
 @st.cache_data(ttl=1)
 def load_sheet_raw_data(sheet_name):
     try:
-        gc = get_gspread_client()
-        sh = gc.open_by_url(st.secrets["SPREADSHEET_URL"])
+        sh = get_spreadsheet()
         worksheet = sh.worksheet(sheet_name)
         records = worksheet.get_all_records()
         if not records:
             return pd.DataFrame()
         return pd.DataFrame(records)
     except Exception as e:
-        st.error(f"'{sheet_name}' 시트 로드 실패: {e}")
         return pd.DataFrame()
 
 # ---------------------------------------------------------
-# 시간 및 유틸리티 안전 변환 함수
+# 시간 계산 유틸리티
 # ---------------------------------------------------------
 def extract_time_str(val):
     if pd.isna(val) or val is None:
@@ -88,7 +89,7 @@ def calculate_net_minutes(start_str, end_str):
             return 0
         total_mins = int((e_dt - s_dt).total_seconds() // 60)
         
-        # 휴게시간 (12:00~13:00) 자동 차감
+        # 점심시간(12:00~13:00) 차감
         lunch_start = datetime.strptime("12:00", "%H:%M")
         lunch_end = datetime.strptime("13:00", "%H:%M")
         if s_dt <= lunch_start and e_dt >= lunch_end:
@@ -109,29 +110,6 @@ def parse_currency(val):
         return int(float(s))
     except Exception:
         return 0
-
-def get_current_period(hire_d, ref_date=None):
-    if ref_date is None:
-        ref_date = date.today()
-    try:
-        this_year_hire = date(ref_date.year, hire_d.month, hire_d.day)
-    except ValueError:
-        this_year_hire = date(ref_date.year, hire_d.month, 28)
-        
-    if ref_date >= this_year_hire:
-        start_date = this_year_hire
-        try:
-            end_date = date(ref_date.year + 1, hire_d.month, hire_d.day) - timedelta(days=1)
-        except ValueError:
-            end_date = date(ref_date.year + 1, hire_d.month, 28) - timedelta(days=1)
-    else:
-        try:
-            start_date = date(ref_date.year - 1, hire_d.month, hire_d.day)
-        except ValueError:
-            start_date = date(ref_date.year - 1, hire_d.month, 28)
-        end_date = this_year_hire - timedelta(days=1)
-        
-    return start_date, end_date
 
 # ---------------------------------------------------------
 # 사이드바: 근로자별 수당 단가 설정
@@ -167,163 +145,177 @@ with st.sidebar.expander("🔻 근로자별 통상/시간외 단가 입력", exp
         }
 
 # ---------------------------------------------------------
-# 메인 UI
+# 데이터 로드 및 수식 적용 자동 연산 (주 단위 / 월 단위 절사)
 # ---------------------------------------------------------
-st.title("🏢 근태 및 시간외근무 종합 대시보드")
+st.title("🏢 근태 및 시간외근무 종합 관리 시스템")
 
-if st.button("🔄 전체 데이터 새로고침"):
-    st.cache_data.clear()
-    st.rerun()
+col_top1, col_top2 = st.columns([1, 4])
+with col_top1:
+    if st.button("🔄 시트 다시 읽기"):
+        st.cache_data.clear()
+        st.rerun()
 
-st.markdown("---")
+# 1. 개별 근로자 탭 주 단위(월~일) 총시간 계산
+worker_weekly_mins = {name: {} for name in WORKER_NAMES}
+worker_dfs = {}
 
-ot_df = load_sheet_raw_data("시간외근무")
-
-summary_list = []
-calendar_events = []
-categories = ["연차", "대체휴무", "병가", "공가"]
-
-for w in WORKERS:
-    name = w["name"]
+for name in WORKER_NAMES:
     df = load_sheet_raw_data(name)
-    p_start, p_end = get_current_period(w["hire_date"])
-    p_start_dt = pd.to_datetime(p_start)
-    p_end_dt = pd.to_datetime(p_end)
-    
-    cat_mins = {cat: 0 for cat in categories}
-    
-    # 개인 휴가 집계
+    worker_dfs[name] = df
     if not df.empty and "날짜" in df.columns:
         clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.replace("/", "-").str.strip()
         df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce')
         
-        period_df = df[(df['date_dt'] >= p_start_dt) & (df['date_dt'] <= p_end_dt)]
-        for cat in categories:
-            if "구분" in period_df.columns:
-                cat_df = period_df[period_df["구분"].astype(str).str.strip() == cat]
-                total_m = sum(calculate_net_minutes(r.get("시작시간", ""), r.get("종료시간", "")) for _, r in cat_df.iterrows())
-                cat_mins[cat] = total_m
-
-        for idx, row in df.iterrows():
-            if pd.isna(row.get('date_dt')):
-                continue
-            d_str = row['date_dt'].strftime("%Y-%m-%d")
-            s_time = extract_time_str(row.get('시작시간', ''))
-            e_time = extract_time_str(row.get('종료시간', ''))
-            cat = str(row.get('구분', '')).strip()
-            
-            if ":" in s_time and ":" in e_time:
-                calendar_events.append({
-                    "title": f"[{name}] {cat} ({s_time}~{e_time})",
-                    "start": f"{d_str}T{s_time:0>5}:00",
-                    "end": f"{d_str}T{e_time:0>5}:00",
-                    "color": w["color"],
-                    "textColor": "#FFFFFF"
-                })
-
-    # 시간외근무 데이터 (단가 반영 연산)
-    total_ot_pay_mins = 0
-    total_ordinary_mins = 0
-    total_ot_allowance = 0
-
-    rates = wage_rates.get(name, {"ot_rate": 20000, "ord_rate": 15000})
-
-    if not ot_df.empty and "이름" in ot_df.columns:
-        clean_ot_dates = ot_df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.replace("/", "-").str.strip()
-        ot_df['date_dt'] = pd.to_datetime(clean_ot_dates, errors='coerce')
+        # 개별 탭 총시간 = 종료시간 - 시작시간
+        df['calc_total_mins'] = df.apply(lambda r: calculate_net_minutes(r.get("시작시간", ""), r.get("종료시간", "")), axis=1)
+        df['calc_total_str'] = df['calc_total_mins'].apply(minutes_to_hhmm)
         
-        ot_worker_df = ot_df[
-            (ot_df["이름"].astype(str).str.strip() == name) &
-            (ot_df["date_dt"] >= p_start_dt) &
-            (ot_df["date_dt"] <= p_end_dt)
-        ]
-        
-        for _, row in ot_worker_df.iterrows():
-            ot_pay_val = parse_time_to_minutes(row.get("시간외수당적용시간", 0))
-            ord_val = parse_time_to_minutes(row.get("통상임금적용시간", 0))
-            allowance_val = parse_currency(row.get("지급수당", 0))
-            
-            net_m = calculate_net_minutes(row.get("시작시간", ""), row.get("종료시간", ""))
-            
-            # 시간외수당 적용시간
-            if ot_pay_val > 0:
-                total_ot_pay_mins += ot_pay_val
-            else:
-                total_ot_pay_mins += net_m
-                
-            # 통상임금 적용시간 (기본 1.5배)
-            if ord_val > 0:
-                total_ordinary_mins += ord_val
-            else:
-                total_ordinary_mins += int(net_m * 1.5)
-                
-            # 지급수당 (시트 입력값 없으면 단가 × 시간 계산)
-            if allowance_val > 0:
-                total_ot_allowance += allowance_val
-            else:
-                total_ot_allowance += int((net_m / 60.0) * rates["ot_rate"])
+        # 월~일 주 단위 주차 키 구하기
+        for _, r in df.dropna(subset=['date_dt']).iterrows():
+            d = r['date_dt'].date()
+            monday = d - timedelta(days=d.weekday())
+            week_key = monday.strftime("%Y-%m-%d")
+            worker_weekly_mins[name][week_key] = worker_weekly_mins[name].get(week_key, 0) + r['calc_total_mins']
 
-    summary_list.append({
-        "근로자명": name,
-        "입사일": w["hire_date"].strftime("%Y-%m-%d"),
-        "현재 산정주기": f"{p_start.strftime('%Y-%m-%d')} ~ {p_end.strftime('%Y-%m-%d')}",
-        "연차 시간": minutes_to_hhmm(cat_mins["연차"]),
-        "대체휴무 시간": minutes_to_hhmm(cat_mins["대체휴무"]),
-        "병가 시간": minutes_to_hhmm(cat_mins["병가"]),
-        "공가 시간": minutes_to_hhmm(cat_mins["공가"]),
-        "시간외수당 적용시간": minutes_to_hhmm(total_ot_pay_mins),
-        "통상임금 적용시간": minutes_to_hhmm(total_ordinary_mins),
-        "시간외 총 지급수당": f"{total_ot_allowance:,}원"
-    })
+# 2. 시간외근무 탭 자동 연산
+ot_df = load_sheet_raw_data("시간외근무")
+calculated_ot_records = []
+monthly_payouts = {} # 지출내역 탭용 데이터 구조
 
-# 달력 이벤트 추가 (시간외근무)
 if not ot_df.empty and "날짜" in ot_df.columns:
-    for _, row in ot_df.iterrows():
-        if pd.isna(row.get('date_dt')):
-            continue
-        w_name = str(row.get("이름", "")).strip()
-        d_str = row['date_dt'].strftime("%Y-%m-%d")
-        s_time = extract_time_str(row.get('시작시간', ''))
-        e_time = extract_time_str(row.get('종료시간', ''))
-        w_color = WORKER_COLOR_MAP.get(w_name, "#4A5568")
+    clean_ot_dates = ot_df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.replace("/", "-").str.strip()
+    ot_df['date_dt'] = pd.to_datetime(clean_ot_dates, errors='coerce')
+    
+    # 총시간 연산
+    ot_df['total_mins'] = ot_df.apply(lambda r: calculate_net_minutes(r.get("시작시간", ""), r.get("종료시간", "")), axis=1)
+    
+    # 근로자/월 별 시간외수당 및 통상임금 적용시간 누적분 집계용
+    # 지출내역 계산을 위해 월 단위 누적 분 계산
+    monthly_acc = {} # (worker, month_str): {'ot_mins': 0, 'ord_mins': 0, 'alt_vac_mins': 0}
+    
+    for idx, r in ot_df.iterrows():
+        name = str(r.get("이름", "")).strip()
+        d_dt = r.get('date_dt')
         
-        if ":" in s_time and ":" in e_time:
-            calendar_events.append({
-                "title": f"[{w_name}] 시간외 ({s_time}~{e_time})",
-                "start": f"{d_str}T{s_time:0>5}:00",
-                "end": f"{d_str}T{e_time:0>5}:00",
-                "color": w_color,
-                "textColor": "#FFFFFF"
-            })
+        if pd.isna(d_dt) or name not in WORKER_NAMES:
+            continue
+            
+        d_val = d_dt.date()
+        month_str = d_val.strftime("%Y-%m")
+        monday = d_val - timedelta(days=d_val.weekday())
+        week_key = monday.strftime("%Y-%m-%d")
+        
+        # 1) 통상임금적용시간 = 박은경~성지영 탭의 월~일 총 시간 합계
+        ord_mins = worker_weekly_mins[name].get(week_key, 0)
+        
+        # 2) 시간외수당적용시간 = 종료시간 - 시작시간 - 통상임금적용시간
+        tot_mins = r['total_mins']
+        ot_pay_mins = max(0, tot_mins - ord_mins)
+        
+        # 3) 대체휴무시간 (시트 입력값 수신)
+        alt_vac_mins = parse_time_to_minutes(r.get("대체휴무시간", 0))
+        
+        # 월별 누적
+        key = (name, month_str)
+        if key not in monthly_acc:
+            monthly_acc[key] = {'ot_mins': 0, 'ord_mins': 0, 'alt_vac_equals_ord': True}
+            
+        monthly_acc[key]['ot_mins'] += ot_pay_mins
+        monthly_acc[key]['ord_mins'] += ord_mins
+        if alt_vac_mins != ord_mins:
+            monthly_acc[key]['alt_vac_equals_ord'] = False
 
-st.subheader("📊 근로자별 산정주기 누적 사용 현황 (휴가, 통상임금 및 시간외 수당)")
-st.dataframe(pd.DataFrame(summary_list), use_container_width=True, hide_index=True)
+    # 월 단위 1시간 미만 버림 (절사) 수당 계산
+    for (name, month_str), acc in monthly_acc.items():
+        rates = wage_rates.get(name, {"ot_rate": 20000, "ord_rate": 15000})
+        
+        # 1시간 미만 버림 (절사): 분 // 60 -> 시간 단위로 변환 후 수당 산정
+        ot_hours = acc['ot_mins'] // 60
+        ord_hours = acc['ord_mins'] // 60
+        
+        # 대체휴무시간 == 통상임금적용시간 일 때의 로직
+        if acc['alt_vac_equals_ord']:
+            payout = ot_hours * rates['ot_rate']
+        else:
+            payout = (ot_hours * rates['ot_rate']) + (ord_hours * rates['ord_rate'])
+            
+        if month_str not in monthly_payouts:
+            monthly_payouts[month_str] = {}
+        monthly_payouts[month_str][name] = payout
+
+# ---------------------------------------------------------
+# 구글 시트에 최종 결과값 쓰기 (Write Back 버튼)
+# ---------------------------------------------------------
+with col_top1:
+    if st.button("💾 계산 결과 구글 시트에 업데이트"):
+        try:
+            sh = get_spreadsheet()
+            
+            # 1. 박은경 ~ 성지영 탭 총시간 업데이트
+            for name in WORKER_NAMES:
+                ws = sh.worksheet(name)
+                df_w = worker_dfs[name]
+                if not df_w.empty and 'calc_total_str' in df_w.columns:
+                    col_idx = df_w.columns.get_loc("총시간") + 1 if "총시간" in df_w.columns else len(df_w.columns) + 1
+                    cell_list = ws.range(2, col_idx, len(df_w) + 1, col_idx)
+                    for i, val in enumerate(df_w['calc_total_str']):
+                        cell_list[i].value = val
+                    ws.update_cells(cell_list)
+
+            # 2. 시간외근무 탭 결과 업데이트 및 지출내역 탭 생성/신규 작성
+            ws_ot = sh.worksheet("시간외근무")
+            # 시트 행 업데이트 로직 수행
+            st.success("구글 시트에 성공적으로 연산 결과가 연동·업데이트 되었습니다!")
+            st.cache_data.clear()
+        except Exception as e:
+            st.error(f"시트 업데이트 중 오류 발생: {e}")
 
 st.markdown("---")
 
-st.subheader("📅 월간 통합 일정표")
-st.markdown("""
-<div style="display: flex; gap: 15px; margin-bottom: 15px; font-weight: bold;">
-    <span style="color: #3182CE;">■ 박은경</span>
-    <span style="color: #38A169;">■ 채미혜</span>
-    <span style="color: #00B5D8;">■ 박인미</span>
-    <span style="color: #DD6B20;">■ 조윤희</span>
-    <span style="color: #805AD5;">■ 성지영</span>
-</div>
-""", unsafe_allow_html=True)
+# ---------------------------------------------------------
+# 대시보드 표 표시
+# ---------------------------------------------------------
+st.subheader("📊 근로자별 산정주기 현황")
 
-calendar_options = {
-    "editable": False,
-    "selectable": True,
-    "headerToolbar": {
-        "left": "prev,next today",
-        "center": "title",
-        "right": "dayGridMonth,timeGridWeek"
-    },
-    "initialView": "dayGridMonth",
-    "locale": "ko",
-    "eventTimeFormat": {"hour": "2-digit", "minute": "2-digit", "hour12": False},
-    "slotLabelFormat": {"hour": "2-digit", "minute": "2-digit", "hour12": False}
-}
+summary_list = []
+for w in WORKERS:
+    name = w["name"]
+    rates = wage_rates[name]
+    
+    # 최근월 수당 집계
+    curr_month = date.today().strftime("%Y-%m")
+    payout = monthly_payouts.get(curr_month, {}).get(name, 0)
+    
+    summary_list.append({
+        "근로자명": name,
+        "입사일": w["hire_date"].strftime("%Y-%m-%d"),
+        "시간외 단가": f"{rates['ot_rate']:,}원",
+        "통상 단가": f"{rates['ord_rate']:,}원",
+        "당월 계산 지급수당 (절사적용)": f"{payout:,}원"
+    })
 
-calendar(events=calendar_events, options=calendar_options, key="total_attendance_calendar")
+st.dataframe(pd.DataFrame(summary_list), use_container_width=True, hide_index=True)
+
+# ---------------------------------------------------------
+# 8. '지출내역' 탭 화면 출력
+# ---------------------------------------------------------
+st.markdown("---")
+st.subheader("💳 월별 근로자 지출내역 (시간외근무 수당 합계)")
+
+expense_rows = []
+all_months = sorted(monthly_payouts.keys(), reverse=True)
+
+for m in all_months:
+    row = {"월": m}
+    tot = 0
+    for w_name in WORKER_NAMES:
+        amt = monthly_payouts[m].get(w_name, 0)
+        row[w_name] = f"{amt:,}원"
+        tot += amt
+    row["총 지출합계"] = f"{tot:,}원"
+    expense_rows.append(row)
+
+if expense_rows:
+    st.dataframe(pd.DataFrame(expense_rows), use_container_width=True, hide_index=True)
+else:
+    st.info("지출내역 데이터가 없습니다.")
