@@ -29,19 +29,18 @@ def get_spreadsheet():
     gc = get_gspread_client()
     return gc.open_by_url(st.secrets["SPREADSHEET_URL"])
 
-# 429 API 에러 방지를 위한 래퍼(Wrapper) 함수
 def fetch_worksheet_records_with_retry(worksheet, max_retries=3):
     for attempt in range(max_retries):
         try:
             return worksheet.get_all_records()
         except gspread.exceptions.APIError as e:
             if "429" in str(e) and attempt < max_retries - 1:
-                time.sleep(2 * (attempt + 1)) # 2초, 4초 지연 후 재시도
+                time.sleep(2 * (attempt + 1))
             else:
                 raise e
 
 # ---------------------------------------------------------
-# 시간 파싱 유틸리티
+# 시간 파싱 및 휴게시간 적용 유틸리티
 # ---------------------------------------------------------
 def extract_time_str(val):
     if pd.isna(val) or val is None:
@@ -68,6 +67,7 @@ def parse_time_to_minutes(val):
     except Exception:
         return 0
 
+# 개별 탭 총시간 = 종료시간 - 시작시간 (점심시간 12:00~13:00 포함 시 차감)
 def calculate_net_minutes(start_str, end_str):
     s_hhmm = extract_time_str(start_str)
     e_hhmm = extract_time_str(end_str)
@@ -88,12 +88,25 @@ def calculate_net_minutes(start_str, end_str):
     except Exception:
         return 0
 
+# 시간외근무 휴게시간 차감 함수 (★ 핵심 수정 사항)
+def apply_break_time(total_mins):
+    """
+    - 4시간 이상 ~ 8시간 미만: 30분 차감
+    - 8시간 이상: 1시간(60분) 차감
+    """
+    if total_mins >= 480:  # 8시간 이상
+        return max(0, total_mins - 60)
+    elif total_mins >= 240: # 4시간 이상 ~ 8시간 미만
+        return max(0, total_mins - 30)
+    else:
+        return total_mins
+
 def minutes_to_hhmm(mins):
     mins = max(0, int(mins))
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
 # ---------------------------------------------------------
-# 주간 통상임금 적용시간 자동 계산 (API 제한 대비 캐싱 처리)
+# 주간 통상임금 적용시간 자동 계산 (월~일 기준)
 # ---------------------------------------------------------
 @st.cache_data(ttl=60)
 def get_weekly_worker_total_minutes(worker_name, work_date):
@@ -178,9 +191,9 @@ with st.form("overtime_form", clear_on_submit=True):
         req_date = st.date_input("근무 날짜", date.today())
     with col3:
         time_options = [f"{h:02d}:{m:02d}" for h in range(0, 24) for m in (0, 30)]
-        start_time = st.selectbox("시작시간", time_options, index=36)
+        start_time = st.selectbox("시작시간", time_options, index=36) # 18:00
     with col4:
-        end_time = st.selectbox("종료시간", time_options, index=42)
+        end_time = st.selectbox("종료시간", time_options, index=42)   # 21:00
 
     col5, col6 = st.columns([6, 4])
     with col5:
@@ -195,23 +208,32 @@ with st.form("overtime_form", clear_on_submit=True):
         if worksheet is None:
             st.error("구글 시트 연결 실패!")
         else:
-            tot_mins = calculate_net_minutes(start_time, end_time)
-            work_time_str = minutes_to_hhmm(tot_mins)
+            # 1. 실제 총 근무시간 계산
+            raw_work_mins = calculate_net_minutes(start_time, end_time)
+            
+            # 2. 휴게시간 차감 규칙 적용 (4~7시간 30분, 8시간 이상 1시간 차감)
+            effective_work_mins = apply_break_time(raw_work_mins)
+            work_time_str = minutes_to_hhmm(effective_work_mins)
 
+            # 3. 통상임금적용시간 (주간 월~일 합계)
             ord_mins = get_weekly_worker_total_minutes(worker_name, req_date)
             ord_time_str = minutes_to_hhmm(ord_mins)
 
+            # 4. 대체휴무시간 파싱
             alt_vac_mins = parse_time_to_minutes(off_time_str)
 
-            ot_pay_mins = max(0, tot_mins - ord_mins - alt_vac_mins)
+            # 5. 시간외수당적용시간 = 휴게차감후근무시간 - 통상임금적용시간 - 대체휴무시간
+            ot_pay_mins = max(0, effective_work_mins - ord_mins - alt_vac_mins)
             ot_pay_time_str = minutes_to_hhmm(ot_pay_mins)
 
+            # 6. 수당 산정 (월/일 단위 1시간 미만 버림 적용: 분 // 60)
             ot_wage = ot_wages.get(worker_name, 20000)
             ord_wage = ord_wages.get(worker_name, 15000)
 
             ot_hours = ot_pay_mins // 60
             ord_hours = ord_mins // 60
 
+            # 대체휴무시간 == 통상임금적용시간 조건 반영
             if alt_vac_mins == ord_mins and ord_mins > 0:
                 calculated_pay = ot_hours * ot_wage
             else:
@@ -234,7 +256,7 @@ with st.form("overtime_form", clear_on_submit=True):
 
             try:
                 worksheet.append_row(new_row)
-                st.success(f"성공적으로 저장되었습니다! (지급수당: {pay_str})")
+                st.success(f"성공적으로 저장되었습니다! (휴게시간 반영 후 지급수당: {pay_str})")
                 st.cache_data.clear()
                 st.rerun()
             except Exception as e:
@@ -251,13 +273,13 @@ else:
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 지출내역 탭 업데이트 (429 에러 방지 처리)
+# 지출내역 탭 업데이트
 # ---------------------------------------------------------
 st.subheader("📊 월별 지출내역 (자동 계산 연동)")
 
 def update_expense_sheet():
     try:
-        time.sleep(1) # API 요청 대기시간 1초 부여
+        time.sleep(1)
         sh = get_spreadsheet()
         
         try:
@@ -299,7 +321,6 @@ def update_expense_sheet():
 
         exp_df = pd.DataFrame(exp_matrix)
         
-        # 쓰기 작업 전 지연
         time.sleep(1)
         exp_ws.clear()
         time.sleep(1)
