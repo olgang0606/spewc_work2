@@ -4,6 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import date, datetime, timedelta
 import re
+import time
 
 st.set_page_config(page_title="시간외근무 및 지출내역 관리", page_icon="⏰", layout="wide")
 
@@ -28,8 +29,19 @@ def get_spreadsheet():
     gc = get_gspread_client()
     return gc.open_by_url(st.secrets["SPREADSHEET_URL"])
 
+# 429 API 에러 방지를 위한 래퍼(Wrapper) 함수
+def fetch_worksheet_records_with_retry(worksheet, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            return worksheet.get_all_records()
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e) and attempt < max_retries - 1:
+                time.sleep(2 * (attempt + 1)) # 2초, 4초 지연 후 재시도
+            else:
+                raise e
+
 # ---------------------------------------------------------
-# 시간 파싱 및 분(minute) 변환 유틸리티
+# 시간 파싱 유틸리티
 # ---------------------------------------------------------
 def extract_time_str(val):
     if pd.isna(val) or val is None:
@@ -56,7 +68,6 @@ def parse_time_to_minutes(val):
     except Exception:
         return 0
 
-# 개별 탭 총시간 = 종료시간 - 시작시간 (점심 12:00~13:00 차감)
 def calculate_net_minutes(start_str, end_str):
     s_hhmm = extract_time_str(start_str)
     e_hhmm = extract_time_str(end_str)
@@ -82,13 +93,14 @@ def minutes_to_hhmm(mins):
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
 # ---------------------------------------------------------
-# 주간(월요일~일요일) 통상임금 적용시간 자동 계산
+# 주간 통상임금 적용시간 자동 계산 (API 제한 대비 캐싱 처리)
 # ---------------------------------------------------------
+@st.cache_data(ttl=60)
 def get_weekly_worker_total_minutes(worker_name, work_date):
     try:
         sh = get_spreadsheet()
         worksheet = sh.worksheet(worker_name)
-        records = worksheet.get_all_records()
+        records = fetch_worksheet_records_with_retry(worksheet)
         if not records:
             return 0
         df = pd.DataFrame(records)
@@ -98,7 +110,6 @@ def get_weekly_worker_total_minutes(worker_name, work_date):
         clean_dates = df['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
         df['date_dt'] = pd.to_datetime(clean_dates, errors='coerce').dt.date
         
-        # 월요일(0) ~ 일요일(6) 기준 범주 설정
         start_of_week = work_date - timedelta(days=work_date.weekday())
         end_of_week = start_of_week + timedelta(days=6)
         
@@ -130,7 +141,7 @@ with st.sidebar.expander("단가 입력", expanded=True):
 # ---------------------------------------------------------
 # 데이터 로드
 # ---------------------------------------------------------
-@st.cache_data(ttl=1)
+@st.cache_data(ttl=10)
 def load_overtime_data():
     target_cols = [
         "이름", "날짜", "시작시간", "종료시간", "근무시간", "근무내용",
@@ -139,7 +150,7 @@ def load_overtime_data():
     try:
         sh = get_spreadsheet()
         worksheet = sh.worksheet("시간외근무")
-        records = worksheet.get_all_records()
+        records = fetch_worksheet_records_with_retry(worksheet)
         if not records:
             return pd.DataFrame(columns=target_cols), worksheet
         df = pd.DataFrame(records)
@@ -167,9 +178,9 @@ with st.form("overtime_form", clear_on_submit=True):
         req_date = st.date_input("근무 날짜", date.today())
     with col3:
         time_options = [f"{h:02d}:{m:02d}" for h in range(0, 24) for m in (0, 30)]
-        start_time = st.selectbox("시작시간", time_options, index=36) # 18:00
+        start_time = st.selectbox("시작시간", time_options, index=36)
     with col4:
-        end_time = st.selectbox("종료시간", time_options, index=42)   # 21:00
+        end_time = st.selectbox("종료시간", time_options, index=42)
 
     col5, col6 = st.columns([6, 4])
     with col5:
@@ -184,29 +195,23 @@ with st.form("overtime_form", clear_on_submit=True):
         if worksheet is None:
             st.error("구글 시트 연결 실패!")
         else:
-            # 1. 근무시간 = 종료시간 - 시작시간
             tot_mins = calculate_net_minutes(start_time, end_time)
             work_time_str = minutes_to_hhmm(tot_mins)
 
-            # 2. 통상임금적용시간 (월~일 총합)
             ord_mins = get_weekly_worker_total_minutes(worker_name, req_date)
             ord_time_str = minutes_to_hhmm(ord_mins)
 
-            # 3. 대체휴무시간
             alt_vac_mins = parse_time_to_minutes(off_time_str)
 
-            # 4. 시간외수당적용시간 = 종료시간-시작시간 - 통상임금적용시간 - 대체휴무시간
             ot_pay_mins = max(0, tot_mins - ord_mins - alt_vac_mins)
             ot_pay_time_str = minutes_to_hhmm(ot_pay_mins)
 
-            # 5. 수당 계산 (월 단위 1시간 미만 버림 적용: 계산 시 시간 단위로 환산)
             ot_wage = ot_wages.get(worker_name, 20000)
             ord_wage = ord_wages.get(worker_name, 15000)
 
-            ot_hours = ot_pay_mins // 60      # 1시간 미만 버림
-            ord_hours = ord_mins // 60        # 1시간 미만 버림
+            ot_hours = ot_pay_mins // 60
+            ord_hours = ord_mins // 60
 
-            # 대체휴무시간 == 통상임금적용시간 조건 분기
             if alt_vac_mins == ord_mins and ord_mins > 0:
                 calculated_pay = ot_hours * ot_wage
             else:
@@ -237,9 +242,6 @@ with st.form("overtime_form", clear_on_submit=True):
 
 st.markdown("---")
 
-# ---------------------------------------------------------
-# 시간외근무 목록
-# ---------------------------------------------------------
 st.subheader("📋 전체 시간외근무 기록 목록")
 if not df.empty:
     st.dataframe(df, use_container_width=True, hide_index=True)
@@ -249,25 +251,24 @@ else:
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 8 & 9. '지출내역' 탭 자동 생성 및 동기화
+# 지출내역 탭 업데이트 (429 에러 방지 처리)
 # ---------------------------------------------------------
 st.subheader("📊 월별 지출내역 (자동 계산 연동)")
 
 def update_expense_sheet():
     try:
+        time.sleep(1) # API 요청 대기시간 1초 부여
         sh = get_spreadsheet()
         
-        # '지출내역' 탭 가져오기 또는 새로 생성
         try:
             exp_ws = sh.worksheet("지출내역")
         except gspread.exceptions.WorksheetNotFound:
             exp_ws = sh.add_worksheet(title="지출내역", rows="100", cols="20")
 
         if df.empty:
-            st.warning("시간외근무 데이터가 없어 지출내역을 생성할 수 없습니다.")
+            st.warning("시간외근무 데이터가 없습니다.")
             return
 
-        # 날짜 파싱 및 월(Year-Month) 컬럼 생성
         df_exp = df.copy()
         clean_dates = df_exp['날짜'].astype(str).str.replace(". ", "-").str.replace(".", "-").str.strip()
         df_exp['ym'] = pd.to_datetime(clean_dates, errors='coerce').dt.strftime('%Y-%m')
@@ -275,7 +276,6 @@ def update_expense_sheet():
 
         unique_months = sorted(df_exp['ym'].unique())
         
-        # 월별/근로자별 집계 데이터 프레임 구축
         exp_matrix = []
         for ym in unique_months:
             row = {"귀속월": ym}
@@ -285,7 +285,6 @@ def update_expense_sheet():
             for w in WORKERS:
                 w_df = month_df[month_df['이름'].astype(str).str.strip() == w]
                 
-                # 원화 포맷 정제 후 합산
                 w_pay_sum = 0
                 for val in w_df['지급수당']:
                     num_s = re.sub(r'[^0-9]', '', str(val))
@@ -300,10 +299,12 @@ def update_expense_sheet():
 
         exp_df = pd.DataFrame(exp_matrix)
         
-        # 구글 시트에 쓰기
+        # 쓰기 작업 전 지연
+        time.sleep(1)
         exp_ws.clear()
+        time.sleep(1)
         exp_ws.update([exp_df.columns.values.tolist()] + exp_df.values.tolist())
-        st.success("구글 시트 '지출내역' 탭에 최신 집계 결과가 성공적으로 반영되었습니다!")
+        st.success("구글 시트 '지출내역' 탭에 최신 집계 결과가 반영되었습니다!")
         return exp_df
     except Exception as e:
         st.error(f"지출내역 반영 실패: {e}")
